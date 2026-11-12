@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -539,6 +540,51 @@ func TestCheckinAccountUpstreamError(t *testing.T) {
 	}
 	if p.Get("acc1").LastError() == "" {
 		t.Error("失败原因应记录到 last_error")
+	}
+}
+
+// TestCheckinSuccessClearsLastError 上一次签到失败留下的错误描述，应在下一次
+// 签到成功后自动消失（面板「状态」列下面的那行红字不该是永久贴纸）。
+func TestCheckinSuccessClearsLastError(t *testing.T) {
+	var down atomic.Bool
+	down.Store(true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if down.Load() {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"code":"100002","desc":"缺少 token"}`)
+			return
+		}
+		if strings.Contains(r.URL.Path, "first-login") {
+			_, _ = io.WriteString(w, `{"code":"000000","data":{"alreadyProcessed":true,
+				"currentBalance":10000,"permanentBalance":5000,"dailyBalance":5000,
+				"dailyQuota":5000,"dailyConsumed":0,"dailyCycleDate":"2026-10-21"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"code":"000000","data":{}}`)
+	}))
+	defer srv.Close()
+
+	pl, p := newTestPanelUpstream(t, srv.URL)
+	post := func() int {
+		req := httptest.NewRequest(http.MethodPost, "/panel/api/accounts/acc1/checkin", nil)
+		w := httptest.NewRecorder()
+		pl.ServeHTTP(w, req)
+		return w.Code
+	}
+
+	if code := post(); code != http.StatusBadGateway {
+		t.Fatalf("首次签到状态码 %d，期望 502", code)
+	}
+	if p.Get("acc1").LastError() == "" {
+		t.Fatal("失败后应记录 last_error")
+	}
+
+	down.Store(false)
+	if code := post(); code != http.StatusOK {
+		t.Fatalf("恢复后签到状态码 %d，期望 200", code)
+	}
+	if got := p.Get("acc1").LastError(); got != "" {
+		t.Errorf("签到成功后 last_error 应清空，仍有 %q", got)
 	}
 }
 

@@ -219,6 +219,32 @@ func TestStickyUnbindOnFailure(t *testing.T) {
 	}
 }
 
+// TestLastErrorClearedOnSuccess 面板「状态」下的错误描述是当前状态：下一次
+// 成功调用必须把它清掉，否则一条早已恢复的错误会一直挂在面板上。
+func TestLastErrorClearedOnSuccess(t *testing.T) {
+	p := New("")
+	a := newTestAccount("a", 500, true)
+	p.Add(a)
+
+	// 客户端类失败（不罚账号、不冷却）：错误只体现在 last_error 上。
+	p.ReportFailure(a, 400, "bad request", "", "m")
+	if a.LastError() == "" {
+		t.Fatal("失败后应记录 last_error")
+	}
+
+	p.ReportSuccess(a, "", "m", 0)
+	if got := a.LastError(); got != "" {
+		t.Errorf("成功后 last_error 应清空，仍有 %q", got)
+	}
+
+	// 人工解冻同样代表「已恢复」，不该留着解冻前的错误。
+	p.ReportFailure(a, 500, "boom", "", "m")
+	a.ResetCooldowns()
+	if got := a.LastError(); got != "" {
+		t.Errorf("解冻后 last_error 应清空，仍有 %q", got)
+	}
+}
+
 // TestModelCooldownScopedToModel 模型级限流只锁该模型，换模型仍可用。
 func TestModelCooldownScopedToModel(t *testing.T) {
 	a := newTestAccount("a", 100, true)

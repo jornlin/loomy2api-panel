@@ -293,7 +293,11 @@ func (a *Account) NoteError(threshold int, base, cap float64) bool {
 	return true
 }
 
-// NoteSuccess 成功一次：清熔断 + 清软冷却退避。
+// NoteSuccess 成功一次：清熔断 + 清软冷却退避 + 清上次错误描述。
+//
+// lastError 是「当前状态」而非历史：这次调用既然成功了，之前那条错误
+// 就不再描述该账号此刻的状态，留着会让面板一直挂一条早已过期的红字。
+// 失败历史另有 Failures 计数与日志，不靠这个字段留档。
 func (a *Account) NoteSuccess() {
 	a.rt.mu.Lock()
 	defer a.rt.mu.Unlock()
@@ -305,9 +309,10 @@ func (a *Account) NoteSuccess() {
 		a.rt.cooldownUntil = 0
 		a.rt.coolKind = ""
 	}
+	a.rt.lastError = ""
 }
 
-// ResetCooldowns 人工解冻：清掉全部冷却与熔断（不动 disabled）。
+// ResetCooldowns 人工解冻：清掉全部冷却、熔断与上次错误（不动 disabled）。
 func (a *Account) ResetCooldowns() {
 	a.rt.mu.Lock()
 	defer a.rt.mu.Unlock()
@@ -318,6 +323,9 @@ func (a *Account) ResetCooldowns() {
 	a.rt.breakerFails = 0
 	a.rt.breakerRetries = 0
 	a.rt.modelCool = nil
+	// 解冻意味着「已恢复正常」，留着解冻前那条错误只会误导。
+	// 登录成功、余额恢复自动解冻也都走这里，所以错误描述随之自动消除。
+	a.rt.lastError = ""
 }
 
 // Touch 记录一次使用。

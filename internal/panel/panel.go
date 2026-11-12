@@ -496,6 +496,7 @@ func (p *Panel) doCheckinCtx(ctx context.Context, acc *pool.Account) (*upstream.
 		acc.SetLastError("签到失败: " + err.Error())
 		return nil, err
 	}
+	acc.SetLastError("") // 这次签到成功了，之前那条失败描述已过期
 	acc.SetQuota(res.Quota)
 	verb := "已领取新额度"
 	if res.AlreadyProcessed {
@@ -672,9 +673,8 @@ func (p *Panel) reviveAccount(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "账号不存在: "+name)
 		return
 	}
-	acc.ResetCooldowns()
+	acc.ResetCooldowns() // 内部已连带清掉 lastError
 	acc.Enabled = true
-	acc.SetLastError("")
 	p.persist(acc)
 	p.Logf("账号 %s 已解冻（冷却与熔断清零）", name)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "account": acc.Public()})
