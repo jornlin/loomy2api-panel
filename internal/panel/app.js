@@ -2095,6 +2095,35 @@ function invTag(a) {
     : '<span class="tag warn" title="未激活：可以绑定邀请码">未激活</span>';
 }
 
+// INV_FILTER / INV_GET：这一页的筛选与排序键。
+// 排序键要和表头的 data-sort 一一对应（sortApply 用 getters[st.field] 取键）。
+let invFilter = 'all';
+const INV_RANK = { bindable: 0, unknown: 1, activated: 2 };
+function invActRank(a) {
+  if (a.activated === null || a.activated === undefined) return INV_RANK.unknown;
+  return a.activated ? INV_RANK.activated : INV_RANK.bindable;
+}
+function invMatch(a, f) {
+  const c = a.invite || {};
+  const used = Number(c.used || 0), max = Number(c.max || 0);
+  switch (f) {
+    case 'bindable': return a.activated === false;
+    case 'activated': return a.activated === true;
+    case 'unknown': return a.activated === null || a.activated === undefined;
+    case 'fresh': return !!c.code && used === 0;
+    case 'full': return !!c.code && max > 0 && used >= max;
+    default: return true;
+  }
+}
+const INV_GET = {
+  name: a => String(a.name || '').toLowerCase(),
+  code: a => String((a.invite || {}).code || ''),
+  used: a => Number((a.invite || {}).used || 0),
+  status: a => String((a.invite || {}).status || ''),
+  activated: a => invActRank(a),
+  applied: a => String(a.applied_invite || ''),
+};
+
 function renderInvites(d) {
   INV = d || {};
   const sm = INV.summary || {};
@@ -2109,12 +2138,24 @@ function renderInvites(d) {
   $('invNote').textContent = note;
   $('invNote').title = note;
 
-  const rows = (INV.accounts || []).slice().sort((x, y) => (y.invite && y.invite.used || 0) - (x.invite && x.invite.used || 0));
+  const all = INV.accounts || [];
+  // 排序键 'used' 默认降序（用得多的先看），筛选条件变化时由 invFilter 的 onchange
+  // 把页码归零；分页与排序都靠 PG_RENDER.inv 重新走一遍这个函数。
+  const visible = all.filter(a => invMatch(a, invFilter));
+  const rows = sortApply('inv', visible, INV_GET, 'used', -1);
   LAST.inv = rows;
   const page = pgApply('invBody', 'inv', rows);
+  sortMark('invBody', 'inv');
+  const listNote = '显示 ' + rows.length + ' / ' + all.length + ' 个';
+  $('invListNote').textContent = listNote;
+  $('invListNote').title = listNote;
   const tb = $('invBody');
-  if (!rows.length) {
+  if (!all.length) {
     tb.innerHTML = '<tr><td colspan="8"><div class="empty">账号池是空的</div></td></tr>';
+    return;
+  }
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="8"><div class="empty">当前筛选没有匹配的账号</div></td></tr>';
     return;
   }
   tb.innerHTML = page.map(a => {
@@ -2205,6 +2246,11 @@ $('btnUsage').onclick = loadUsage;
 trangeBind('usRange', loadUsage);
 
 /* 邀请页按钮与行内操作。绑定是写操作，确认框里把「不可逆」和将绑的数量说清楚。 */
+$('invFilter').onchange = () => {
+  invFilter = $('invFilter').value;
+  PG.inv.page = 0;                 // 换筛选条件回第一页，否则会停在空页
+  renderInvites(INV || {});
+};
 $('btnInvScan').onclick = invScan;
 $('btnInvReload').onclick = loadInvites;
 $('btnInvDry').onclick = () => invBind(true);
@@ -2650,6 +2696,9 @@ PG_RENDER.err = () => renderErrorSummary(LAST.err);
 PG_RENDER.credit = () => renderCreditHistory(LAST.credit);
 PG_RENDER.usHour = () => renderHourlyTable(LAST.hour || []);
 PG_RENDER.usDim = () => renderUsageDim();
+// 邀请页：分页、表头排序、筛选都靠这一个重渲染入口（缺了它，点下一页/点表头
+// 只改状态不重画，表现就是「分页不管用、排序没反应」）。
+PG_RENDER.inv = () => renderInvites(INV || {});
 PG_RENDER.usCredit = () => renderCreditDim();
 // 积分构成：卡片网格与明细表共用同一份数据（lastPackages），换页时重画即可。
 PG_RENDER.pk = () => { if (lastPackages) renderPackages(lastPackages); };

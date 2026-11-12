@@ -122,3 +122,61 @@ func TestStatsStripSingleRow(t *testing.T) {
 		t.Errorf(".stats 应使用 auto-fit 自适应列数，实际规则：%s", rule)
 	}
 }
+
+// TestEveryPagerHasRenderer 每个用了 pgApply 的列表都必须注册 PG_RENDER.<key>。
+//
+// 这条漂移的后果很具体：点「下一页」/点表头/改每页条数时，事件处理器只更新分页
+// 状态再调 PG_RENDER[key]() —— 没注册就等于什么都没发生，表现是「分页不管用、
+// 排序没反应」（邀请码页首版就漏了这一行）。
+func TestEveryPagerHasRenderer(t *testing.T) {
+	src := string(appJS)
+	used := map[string]bool{}
+	for _, m := range regexp.MustCompile(`pgApply\('[A-Za-z0-9]+',\s*'([A-Za-z0-9]+)'`).FindAllStringSubmatch(src, -1) {
+		used[m[1]] = true
+	}
+	registered := map[string]bool{}
+	for _, m := range regexp.MustCompile(`PG_RENDER\.([A-Za-z0-9]+)\s*=`).FindAllStringSubmatch(src, -1) {
+		registered[m[1]] = true
+	}
+	if len(used) < 5 {
+		t.Fatalf("没解析到几个分页表（正则失效？）: %v", used)
+	}
+	for k := range used {
+		if !registered[k] {
+			t.Errorf("分页 key %q 没有 PG_RENDER.%s —— 分页/排序点了不会有反应", k, k)
+		}
+	}
+}
+
+// TestInviteSortKeysResolve 邀请表的每个可排序列都要有对应的取键函数。
+//
+// sortApply(key, rows, getters, ...) 用 getters[st.field] 取值，取不到就退回默认列 ——
+// 表头点了没反应、或者点了排的是别的列，都从这里来。
+func TestInviteSortKeysResolve(t *testing.T) {
+	html := string(indexHTML)
+	src := string(appJS)
+	tbl := regexp.MustCompile(`(?s)data-sortkey="inv".*?</table>`).FindString(html)
+	if tbl == "" {
+		t.Fatal("找不到邀请表（data-sortkey=\"inv\"）")
+	}
+	fields := []string{}
+	for _, m := range regexp.MustCompile(`data-sort="([A-Za-z0-9]+)"`).FindAllStringSubmatch(tbl, -1) {
+		fields = append(fields, m[1])
+	}
+	if len(fields) == 0 {
+		t.Fatal("邀请表没有任何可排序列")
+	}
+	block := regexp.MustCompile(`(?s)const INV_GET = \{(.*?)\n\};`).FindStringSubmatch(src)
+	if block == nil {
+		t.Fatal("app.js 里找不到 INV_GET")
+	}
+	has := map[string]bool{}
+	for _, m := range regexp.MustCompile(`([A-Za-z0-9]+):\s*a =>`).FindAllStringSubmatch(block[1], -1) {
+		has[m[1]] = true
+	}
+	for _, f := range fields {
+		if !has[f] {
+			t.Errorf("表头可排序列 %q 在 INV_GET 里没有取键函数", f)
+		}
+	}
+}
