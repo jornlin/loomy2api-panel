@@ -13,6 +13,11 @@ bin/
 /logs/
 *.log
 
+# 凭证备份（tar.gz 里是全部账号的 session，误提交等于把号交出去）
+auths-backup-*.tar.gz
+accounts.json.bak-*
+accounts.json.full-*
+
 # 台账与状态
 state.json
 state.json.tmp
