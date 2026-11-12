@@ -228,8 +228,8 @@ func TestCheckinParsesRealSample(t *testing.T) {
 	if res.CycleDate != "2026-10-21" {
 		t.Errorf("CycleDate = %q", res.CycleDate)
 	}
-	if len(res.InvitationCodes) != 1 || res.InvitationCodes[0]["inviteCode"] != "FWF6D5" {
-		t.Errorf("邀请码未解析: %v", res.InvitationCodes)
+	if len(res.Invitations) != 1 || res.Invitations[0].Code != "FWF6D5" {
+		t.Errorf("邀请码未解析: %v", res.Invitations)
 	}
 	q := res.Quota
 	if q == nil || q.Available == nil || *q.Available != 10000 || q.DailyQuota == nil || *q.DailyQuota != 5000 {
@@ -701,5 +701,96 @@ func TestOnboardingPointsSum(t *testing.T) {
 	}
 	if sum != OnboardingTotal {
 		t.Fatalf("表内合计 = %d，期望 %d", sum, OnboardingTotal)
+	}
+}
+
+// TestActivationParse GET /points/activation 的解析（真机响应形态）。
+func TestActivationParse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "points/activation") {
+			w.WriteHeader(404)
+			return
+		}
+		if r.Method != http.MethodGet {
+			t.Errorf("激活状态查询必须是 GET，实际 %s", r.Method)
+		}
+		_, _ = io.WriteString(w, `{"code":"000000","desc":"成功","data":{"activated":true,"appliedInvitationCode":"4FQAYF"}}`)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "0.9.38", "", 5*time.Second)
+	act, err := c.Activation(context.Background(), "sess")
+	if err != nil {
+		t.Fatalf("查询失败: %v", err)
+	}
+	if !act.Activated || act.Applied != "4FQAYF" {
+		t.Fatalf("解析不对: %+v", act)
+	}
+}
+
+// TestBindInviteAndRedeemBody 绑定与兑换的请求体必须与客户端一致：
+// 绑定带 inviteCode（有设备号时一并带上 deviceId），兑换带 code。
+func TestBindInviteAndRedeemBody(t *testing.T) {
+	var bindBody, redeemBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var body map[string]any
+		_ = json.Unmarshal(raw, &body)
+		switch {
+		case strings.Contains(r.URL.Path, "points/activation"):
+			bindBody = body
+		case strings.Contains(r.URL.Path, "redemption-codes/redeem"):
+			redeemBody = body
+		}
+		_, _ = io.WriteString(w, `{"code":"000000","desc":"成功","data":{}}`)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "0.9.38", "", 5*time.Second)
+	if _, err := c.BindInvite(context.Background(), "sess", " Q7959Z ", "loomy-campus-abc"); err != nil {
+		t.Fatalf("绑定失败: %v", err)
+	}
+	if bindBody["inviteCode"] != "Q7959Z" || bindBody["deviceId"] != "loomy-campus-abc" {
+		t.Errorf("绑定请求体不对: %v", bindBody)
+	}
+	if _, err := c.Redeem(context.Background(), "sess", " GIFT-1 "); err != nil {
+		t.Fatalf("兑换失败: %v", err)
+	}
+	if redeemBody["code"] != "GIFT-1" {
+		t.Errorf("兑换请求体不对: %v", redeemBody)
+	}
+}
+
+// TestFirstLoginWithInvite 带邀请码的首登必须成对带 deviceId（客户端语义）。
+func TestFirstLoginWithInvite(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &got)
+		_, _ = io.WriteString(w, `{"code":"000000","data":{"alreadyProcessed":false,"currentBalance":1,`+
+			`"permanentBalance":1,"dailyBalance":1,"dailyQuota":5000,"dailyConsumed":0,`+
+			`"dailyCycleDate":"2026-11-13","invitationCodes":[{"inviteCode":"NEWCD1","usedCount":0,"maxUses":20,"status":"active"}]}}`)
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, "0.9.38", "", 5*time.Second)
+
+	res, err := c.CheckinWithInvite(context.Background(), "sess", "ABC123", "dev-1")
+	if err != nil {
+		t.Fatalf("首登失败: %v", err)
+	}
+	if got["inviteCode"] != "ABC123" || got["deviceId"] != "dev-1" {
+		t.Errorf("首登请求体应成对带上邀请码与设备号，实际 %v", got)
+	}
+	if len(res.Invitations) != 1 || res.Invitations[0].Code != "NEWCD1" {
+		t.Errorf("邀请码未解析: %+v", res.Invitations)
+	}
+
+	// 不带邀请码时不该塞空字段（上游对多余字段虽宽容，但语义上要干净）。
+	got = nil
+	if _, err := c.Checkin(context.Background(), "sess"); err != nil {
+		t.Fatalf("普通签到失败: %v", err)
+	}
+	if _, ok := got["inviteCode"]; ok {
+		t.Errorf("普通签到不该带 inviteCode: %v", got)
 	}
 }

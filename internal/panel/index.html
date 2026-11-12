@@ -689,6 +689,9 @@ th.sorted[data-dir="desc"]::after { content: " ▼"; font-size: 10px; }
       <li><a href="#packages" data-view="packages">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.2 5.4 8 2.5l5.8 2.9v5.2L8 13.5l-5.8-2.9z"/><path d="M2.2 5.4 8 8.3l5.8-2.9M8 8.3v5.2"/></svg>
         积分构成</a></li>
+      <li><a href="#invites" data-view="invites">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M6.2 9.8 3.9 12a2.1 2.1 0 0 1-3-3l2.3-2.3"/><path d="M9.8 6.2 12.1 4a2.1 2.1 0 0 1 3 3l-2.3 2.3"/><path d="M5.8 10.2l4.4-4.4"/></svg>
+        邀请码</a></li>
       <li><a href="#models" data-view="models">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/></svg>
         模型与档位</a></li>
@@ -820,6 +823,71 @@ th.sorted[data-dir="desc"]::after { content: " ▼"; font-size: 10px; }
     </section>
 
     <!-- 模型与档位 -->
+    <section class="view" id="view-invites" hidden>
+      <div class="box">
+        <header>
+          <h3>邀请码总览</h3>
+          <span class="grow"></span>
+          <span class="note" id="invNote">—</span>
+          <button class="xs" id="btnInvScan" title="逐号查 GET /points/activation（只读，约每号一次请求）">扫描激活状态</button>
+          <button class="xs" id="btnInvReload">刷新</button>
+        </header>
+        <div class="stats">
+          <div class="stat"><div class="v" id="invCodes">-</div><div class="k">池内邀请码</div></div>
+          <div class="stat"><div class="v" id="invUsed">-</div><div class="k">已使用次数</div></div>
+          <div class="stat"><div class="v" id="invSlots">-</div><div class="k">剩余可用名额</div></div>
+          <div class="stat good"><div class="v" id="invActivated">-</div><div class="k">已激活</div></div>
+          <div class="stat warn"><div class="v" id="invUnactivated">-</div><div class="k">未激活（可绑）</div></div>
+          <div class="stat"><div class="v" id="invUnknown">-</div><div class="k">状态未知</div></div>
+        </div>
+        <div class="pad">
+          <div class="hint" style="margin-bottom:10px">
+            上游的奖励只给<b>被邀请人</b>：新号填写邀请码得 5,000 分（实测）。绑定是<b>一次性、不可逆</b>，
+            已激活的号再绑没有收益 —— 所以绑定只对「未激活」的号执行，状态未知的会先被跳过。
+          </div>
+          <div class="grid3">
+            <label class="fld"><span class="lb">绑定邀请码</span>
+              <input id="invCodeInput" placeholder="6 位邀请码，如 Q7959Z" autocomplete="off">
+              <span class="hint">先「预演」看会绑哪些号，确认后再写入</span></label>
+            <label class="fld"><span class="lb">只绑这一个账号（可选）</span>
+              <input id="invAccInput" placeholder="留空 = 全部未激活的号" autocomplete="off"></label>
+            <div class="fld"><span class="lb">操作</span>
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <button class="xs" id="btnInvDry">预演</button>
+                <button class="xs primary" id="btnInvBind">确认绑定</button>
+              </div>
+              <span class="hint">绑定用的是每个号自己的校园设备号（面板每号一套）</span></div>
+          </div>
+          <div class="grid3" style="margin-top:10px">
+            <label class="fld"><span class="lb">兑换积分码</span>
+              <input id="redeemCodeInput" placeholder="兑换码" autocomplete="off">
+              <span class="hint">POST /points/redemption-codes/redeem</span></label>
+            <label class="fld"><span class="lb">用哪个账号兑换</span>
+              <input id="redeemAccInput" placeholder="账号名，必填" autocomplete="off">
+              <span class="hint">兑换的分进这个号的账，所以必须点名</span></label>
+            <div class="fld"><span class="lb">操作</span>
+              <div><button class="xs" id="btnRedeem">兑换</button></div>
+              <span class="hint">兑换后自动刷新该号额度快照</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header><h3>逐号明细</h3><span class="grow"></span>
+          <span class="note">「自己的码」来自每次额度刷新时的 first-login；「激活」需点上面的扫描按钮</span></header>
+        <div class="tbl-wrap">
+        <table class="acc" data-sortkey="inv">
+          <thead><tr>
+            <th class="mark" aria-hidden="true"></th>
+            <th>账号</th><th>自己的邀请码</th><th class="num">已用 / 上限</th>
+            <th>码状态</th><th>激活</th><th>已绑定的码</th><th class="c-acts"></th>
+          </tr></thead>
+          <tbody id="invBody"></tbody>
+        </table>
+        </div>
+      </div>
+    </section>
+
     <section class="view" id="view-models" hidden>
       <div class="box">
         <header>
@@ -1053,6 +1121,9 @@ th.sorted[data-dir="desc"]::after { content: " ▼"; font-size: 10px; }
               <label class="fld"><span class="lb">登录态役龄播报阈值（天）</span>
                 <input name="session_renew_before_days" type="number" min="0">
                 <span class="hint">役龄到点在日志播报一次（默认 14 = 客户端申请值；本地到期日是估计值，不作判据）</span></label>
+              <label class="fld"><span class="lb">新号默认邀请码</span>
+                <input name="new_account_invite_code" placeholder="留空 = 不做归因" autocomplete="off">
+                <span class="hint">加新号时用它做首登归因（奖励归新号自己 5000 分）；老号再调是幂等空操作</span></label>
               <label class="fld"><span class="lb">赠送余额尾巴阈值（分）</span>
                 <input name="daily_tail_points" type="number" min="0">
                 <span class="hint">每日赠送余额低于此值就当作已用尽、不再选它（单笔消耗不可预知，留条尾巴免得溢出到永久积分）；0 = 关闭</span></label>

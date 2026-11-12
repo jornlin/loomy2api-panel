@@ -53,8 +53,8 @@ type Account struct {
 	Paused   bool   `json:"paused,omitempty"` // 暂停选号：不参与转发，但照常签到/刷额度（保号）
 	Proxy    string `json:"proxy,omitempty"`
 
-	Session    string `json:"session,omitempty"`
-	UserID     string `json:"userid,omitempty"`
+	Session string `json:"session,omitempty"`
+	UserID  string `json:"userid,omitempty"`
 	// ExpireAt 本地估计的登录态到期墙钟（= ObtainedAt + 客户端申请的 14 天）。
 	// 上游没有下发过期时间，所以这是**编出来的估计值，只用于展示**，不作判据。
 	ExpireAt   int64 `json:"expireAt,omitempty"`
@@ -75,6 +75,15 @@ type Account struct {
 	DailyUsed      *int64 `json:"daily_used,omitempty"`
 	DailyCycleDate string `json:"daily_cycle_date,omitempty"`
 	QuotaAt        int64  `json:"quota_updated_at,omitempty"`
+
+	// 邀请码与激活状态（邀请页用；都是长期事实，落盘）。
+	//   Invites      —— 这个号**自己的**码，随每次额度刷新（first-login）更新；
+	//   Activated    —— 是否已激活（nil = 还没查过），激活一次性、绑了不能改；
+	//   AppliedInvite—— 已绑定的那个码（别人给的），用于排查"这批号归谁"。
+	Invites       []upstream.InviteCode `json:"invites,omitempty"`
+	Activated     *bool                 `json:"activated,omitempty"`
+	AppliedInvite string                `json:"applied_invite_code,omitempty"`
+	ActivationAt  int64                 `json:"activation_checked_at,omitempty"`
 
 	// 累计计数（落盘，重启不清零——用户对账要用）
 	Requests   int64 `json:"requests"`
@@ -658,6 +667,8 @@ func (a *Account) Public() map[string]any {
 	if a.rt.dayKey == todayKey() {
 		permBurned = a.rt.permBurned
 	}
+	invites := a.Invites
+	activated := a.Activated
 	a.rt.mu.Unlock()
 
 	sess := ""
@@ -670,54 +681,58 @@ func (a *Account) Public() map[string]any {
 		}
 	}
 	out := map[string]any{
-		"name":                  a.Name,
-		"uid":                   a.Name, // 面板统一身份键（蓝本 workbuddy 用 uid，Loomy 用账号名）
-		"nickname":              a.Name,
-		"remark":                a.Remark,
-		"loginid":               a.LoginID,
-		"userid":                a.UserID,
-		"enabled":               a.Enabled,
-		"paused":                a.Paused,
-		"disabled":              !a.Enabled,
-		"has_password":          a.Password != "",
-		"proxy":                 a.Proxy,
-		"session":               sess,
+		"name":         a.Name,
+		"uid":          a.Name, // 面板统一身份键（蓝本 workbuddy 用 uid，Loomy 用账号名）
+		"nickname":     a.Name,
+		"remark":       a.Remark,
+		"loginid":      a.LoginID,
+		"userid":       a.UserID,
+		"enabled":      a.Enabled,
+		"paused":       a.Paused,
+		"disabled":     !a.Enabled,
+		"has_password": a.Password != "",
+		"proxy":        a.Proxy,
+		"session":      sess,
 		// session_valid = 手里还有凭证。真死（上游拒绝后清空）才会变 false；
 		// 本地上「到期」不再是判据，所以它不再会因为役龄而翻成 false。
-		"session_valid":         a.HasSession(),
-		"session_days_left":     nil, // 本地估计的剩余天数（仅展示，见 session_age_days）
-		"session_age_days":      nil, // 役龄：面板一律报这个，不报「剩余」
-		"session_stale":         a.SessionStale(),
-		"session_suspect":       suspectLeft > 0,
-		"session_suspect_left":  maxF(round1(suspectLeft), 0),
-		"session_suspect_hits":  suspectHits,
+		"session_valid":          a.HasSession(),
+		"session_days_left":      nil, // 本地估计的剩余天数（仅展示，见 session_age_days）
+		"session_age_days":       nil, // 役龄：面板一律报这个，不报「剩余」
+		"session_stale":          a.SessionStale(),
+		"session_suspect":        suspectLeft > 0,
+		"session_suspect_left":   maxF(round1(suspectLeft), 0),
+		"session_suspect_hits":   suspectHits,
 		"observed_lifetime_days": nil,
-		"expire_at":             a.ExpireAt,
-		"checkin_done":          a.CheckinDone(),
-		"balance":               nil,
-		"daily_balance":         nil,
-		"available":             nil,
-		"permanent":             nil,
-		"daily_quota":           nil,
-		"daily_used":            nil,
-		"daily_cycle_date":      "",
-		"quota_updated_at":      a.QuotaAt,
-		"requests":              a.Requests,
-		"points_used":           a.PointsUsed,
-		"daily_consumed":        dailyConsumed,
-		"daily_usable":          a.DailyUsableToday(),
-		"perm_burned_today":     permBurned,
-		"failures":              a.Failures,
-		"in_cooldown":           coolLeft > 0 || breakerLeft > 0,
-		"cooldown_seconds_left": maxF(round1(coolLeft), 0),
-		"cooldown_kind":         kind,
-		"soft_streak":           softStreak,
-		"in_breaker":            breakerLeft > 0,
-		"breaker_seconds_left":  maxF(round1(breakerLeft), 0),
-		"breaker_fails":         breakerFails,
-		"model_cooldowns":       modelCool,
-		"inflight":              inflight,
-		"last_error":            lastErr,
+		"expire_at":              a.ExpireAt,
+		"checkin_done":           a.CheckinDone(),
+		"balance":                nil,
+		"daily_balance":          nil,
+		"available":              nil,
+		"permanent":              nil,
+		"daily_quota":            nil,
+		"daily_used":             nil,
+		"daily_cycle_date":       "",
+		"invites":                invites,
+		"activated":              activated,
+		"applied_invite":         a.AppliedInvite,
+		"activation_at":          a.ActivationAt,
+		"quota_updated_at":       a.QuotaAt,
+		"requests":               a.Requests,
+		"points_used":            a.PointsUsed,
+		"daily_consumed":         dailyConsumed,
+		"daily_usable":           a.DailyUsableToday(),
+		"perm_burned_today":      permBurned,
+		"failures":               a.Failures,
+		"in_cooldown":            coolLeft > 0 || breakerLeft > 0,
+		"cooldown_seconds_left":  maxF(round1(coolLeft), 0),
+		"cooldown_kind":          kind,
+		"soft_streak":            softStreak,
+		"in_breaker":             breakerLeft > 0,
+		"breaker_seconds_left":   maxF(round1(breakerLeft), 0),
+		"breaker_fails":          breakerFails,
+		"model_cooldowns":        modelCool,
+		"inflight":               inflight,
+		"last_error":             lastErr,
 		"identity": map[string]any{
 			"devid":            a.Identity.DevID,
 			"ua":               a.Identity.UA,
@@ -758,6 +773,55 @@ func (a *Account) Public() map[string]any {
 	return out
 }
 
+// SetInvites 更新这个号自己的邀请码（first-login 下发，随额度刷新一起更新）。
+func (a *Account) SetInvites(list []upstream.InviteCode) {
+	if len(list) == 0 {
+		return
+	}
+	a.rt.mu.Lock()
+	a.Invites = list
+	a.rt.mu.Unlock()
+}
+
+// SetActivation 记录激活状态（GET /points/activation 的结果）。
+//
+// 只有"查到了"才写：网络失败不能把状态冲成未激活，否则面板会把已激活的号
+// 重新算进"可绑定"名单里，而绑定是不可逆的。
+func (a *Account) SetActivation(act *upstream.Activation) {
+	if act == nil {
+		return
+	}
+	yes := act.Activated
+	a.rt.mu.Lock()
+	a.Activated = &yes
+	if act.Applied != "" {
+		a.AppliedInvite = act.Applied
+	}
+	a.ActivationAt = time.Now().Unix()
+	a.rt.mu.Unlock()
+}
+
+// Invite 取主邀请码（每号一个；没有返回零值）。
+func (a *Account) Invite() upstream.InviteCode {
+	a.rt.mu.Lock()
+	defer a.rt.mu.Unlock()
+	if len(a.Invites) == 0 {
+		return upstream.InviteCode{}
+	}
+	return a.Invites[0]
+}
+
+// IsActivated 激活状态（未查询过返回 nil）。
+func (a *Account) IsActivated() *bool {
+	a.rt.mu.Lock()
+	defer a.rt.mu.Unlock()
+	if a.Activated == nil {
+		return nil
+	}
+	v := *a.Activated
+	return &v
+}
+
 // SetQuota 更新额度缓存（来自 upstream.Quota 的真实快照）。
 func (a *Account) SetQuota(q *upstream.Quota) {
 	if q == nil {
@@ -767,6 +831,9 @@ func (a *Account) SetQuota(q *upstream.Quota) {
 	a.Balance, a.DailyBalance, a.Available = q.Balance, q.Daily, q.Available
 	a.Permanent, a.DailyQuota, a.DailyUsed = q.Permanent, q.DailyQuota, q.DailyUsed
 	a.DailyCycleDate, a.QuotaAt = q.CycleDate, q.RefreshedAt
+	if len(q.Invitations) > 0 {
+		a.Invites = q.Invitations
+	}
 	a.rt.mu.Unlock()
 }
 
@@ -798,20 +865,24 @@ func AccountFromMap(raw map[string]any, index int) *Account {
 		name = "account" + itoa(index+1)
 	}
 	acc := &Account{
-		Name:       name,
-		LoginID:    strOf(raw["loginid"], raw["phone"]),
-		Password:   strOf(raw["password"]),
-		Proxy:      strOf(raw["proxy"]),
-		Remark:     strOf(raw["remark"]),
-		Session:    strOf(raw["session"]),
-		UserID:     strOf(raw["userid"]),
-		ExpireAt:   int64Of(raw["expireAt"], raw["expire_at"]),
-		ObtainedAt: int64Of(raw["obtainedAt"], raw["obtained_at"]),
+		Name:          name,
+		LoginID:       strOf(raw["loginid"], raw["phone"]),
+		Password:      strOf(raw["password"]),
+		Proxy:         strOf(raw["proxy"]),
+		Remark:        strOf(raw["remark"]),
+		Session:       strOf(raw["session"]),
+		UserID:        strOf(raw["userid"]),
+		ExpireAt:      int64Of(raw["expireAt"], raw["expire_at"]),
+		ObtainedAt:    int64Of(raw["obtainedAt"], raw["obtained_at"]),
+		Invites:       inviteListFrom(raw["invites"]),
+		Activated:     boolPtrFrom(raw["activated"]),
+		AppliedInvite: strOf(raw["applied_invite_code"], raw["appliedInviteCode"]),
+		ActivationAt:  int64Of(raw["activation_checked_at"], raw["activationAt"]),
 		// 兼容 loomy2api 的 observedLifetime（两边凭证文件可互搬）。
 		ObservedLifetime: int64Of(raw["observedLifetime"], raw["observed_lifetime"]),
 		Requests:         int64Of(raw["requests"]),
-		PointsUsed: int64Of(raw["pointsUsed"], raw["points_used"]),
-		Failures:   int64Of(raw["failures"]),
+		PointsUsed:       int64Of(raw["pointsUsed"], raw["points_used"]),
+		Failures:         int64Of(raw["failures"]),
 	}
 	acc.Enabled = true
 	if v, ok := raw["enabled"]; ok {
@@ -840,6 +911,37 @@ func AccountFromMap(raw map[string]any, index int) *Account {
 	acc.DailyCycleDate = strOf(raw["daily_cycle_date"])
 	acc.QuotaAt = int64Of(raw["quota_updated_at"])
 	return acc
+}
+
+// inviteListFrom 从落盘 JSON 里取邀请码列表。
+func inviteListFrom(v any) []upstream.InviteCode {
+	list, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]upstream.InviteCode, 0, len(list))
+	for _, it := range list {
+		m, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		out = append(out, upstream.InviteCode{
+			Code:   strOf(m["inviteCode"]),
+			Status: strOf(m["status"]),
+			Used:   int64Of(m["usedCount"]),
+			Max:    int64Of(m["maxUses"]),
+		})
+	}
+	return out
+}
+
+// boolPtrFrom 取可选的布尔（区分「false」与「没查过」）。
+func boolPtrFrom(v any) *bool {
+	b, ok := v.(bool)
+	if !ok {
+		return nil
+	}
+	return &b
 }
 
 // ptrFrom 从落盘 JSON 里取可选整数（缺失返回 nil——「未知」与「0」必须能区分，
@@ -896,6 +998,19 @@ func (a *Account) persisted() map[string]any {
 	}
 	if a.ObtainedAt != 0 {
 		out["obtainedAt"] = a.ObtainedAt
+	}
+	// 邀请码与激活状态：都是长期事实（激活一次性），落盘后重启不用重查。
+	if len(a.Invites) > 0 {
+		out["invites"] = a.Invites
+	}
+	if a.Activated != nil {
+		out["activated"] = *a.Activated
+	}
+	if a.AppliedInvite != "" {
+		out["applied_invite_code"] = a.AppliedInvite
+	}
+	if a.ActivationAt != 0 {
+		out["activation_checked_at"] = a.ActivationAt
 	}
 	// 实测寿命必须落盘：这是唯一学到的真实 TTL，重启后还得用来指导补号节奏。
 	if a.ObservedLifetime != 0 {

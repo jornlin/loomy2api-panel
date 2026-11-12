@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/misakano7545/loomy2api-panel/internal/config"
+	"github.com/misakano7545/loomy2api-panel/internal/upstream"
 	"github.com/misakano7545/loomy2api-panel/internal/usage"
 )
 
@@ -43,7 +44,12 @@ func fakeUpstream(t *testing.T) *httptest.Server {
 func TestPackagesHandler(t *testing.T) {
 	srv := fakeUpstream(t)
 	defer srv.Close()
-	pl, _ := newTestPanelUpstream(t, srv.URL)
+	pl, p := newTestPanelUpstream(t, srv.URL)
+	// 邀请码现在来自账号上已经落地的数据（额度刷新时 first-login 顺带更新），
+	// 积分构成页不再自己打上游 —— 这里模拟"刷新过一次"的状态。
+	p.Get("acc1").SetInvites([]upstream.InviteCode{
+		{Code: "FWF6D5", Status: "active", Used: 0, Max: 1000},
+	})
 
 	req := httptest.NewRequest(http.MethodGet, "/panel/api/packages", nil)
 	w := httptest.NewRecorder()
@@ -58,10 +64,14 @@ func TestPackagesHandler(t *testing.T) {
 			Remain          int64            `json:"remain"`
 			Size            int64            `json:"size"`
 			Packages        []map[string]any `json:"packages"`
-			InvitationCodes []map[string]any `json:"invitation_codes"`
-			DailyCycleDate  string           `json:"daily_cycle_date"`
-			CheckinDone     bool             `json:"checkin_done"`
-			Error           string           `json:"error"`
+			InvitationCodes []struct {
+				Code string `json:"inviteCode"`
+				Used int64  `json:"usedCount"`
+				Max  int64  `json:"maxUses"`
+			} `json:"invitation_codes"`
+			DailyCycleDate string `json:"daily_cycle_date"`
+			CheckinDone    bool   `json:"checkin_done"`
+			Error          string `json:"error"`
 		} `json:"accounts"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
@@ -86,7 +96,7 @@ func TestPackagesHandler(t *testing.T) {
 	if !names["每日赠送"] || !names["长期积分"] {
 		t.Errorf("包口径不全: %v", names)
 	}
-	if len(a.InvitationCodes) != 1 || a.InvitationCodes[0]["inviteCode"] != "FWF6D5" {
+	if len(a.InvitationCodes) != 1 || a.InvitationCodes[0].Code != "FWF6D5" {
 		t.Errorf("邀请码没带出来: %v", a.InvitationCodes)
 	}
 	if a.DailyCycleDate != "2026-10-21" {
@@ -346,15 +356,15 @@ func TestUsageWindowFollowsRange(t *testing.T) {
 		{"hours=72", 2},
 		{"hours=168", 3},
 		{"hours=720", 3},
-		{"hours=0", 3},   // 全部历史
-		{"", 3},          // 不给参数：默认 24 小时 → 只有 1 条；见下断言
+		{"hours=0", 3}, // 全部历史
+		{"", 3},        // 不给参数：默认 24 小时 → 只有 1 条；见下断言
 	}
 	for _, c := range cases {
 		req := httptest.NewRequest(http.MethodGet, "/panel/api/usage?"+c.query, nil)
 		w := httptest.NewRecorder()
 		pl.ServeHTTP(w, req)
 		var out struct {
-			Window map[string]any `json:"window"`
+			Window map[string]any   `json:"window"`
 			Hourly []map[string]any `json:"hourly"`
 		}
 		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
@@ -409,10 +419,10 @@ func TestUsageReportsTruncatedCoverage(t *testing.T) {
 	w := httptest.NewRecorder()
 	pl.ServeHTTP(w, req)
 	var out struct {
-		Window      map[string]any `json:"window"`
-		Oldest      int64          `json:"oldest"`
-		MaxEntries  int            `json:"max_entries"`
-		Truncated   bool           `json:"truncated"`
+		Window     map[string]any `json:"window"`
+		Oldest     int64          `json:"oldest"`
+		MaxEntries int            `json:"max_entries"`
+		Truncated  bool           `json:"truncated"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)

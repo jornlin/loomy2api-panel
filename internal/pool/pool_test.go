@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/misakano7545/loomy2api-panel/internal/upstream"
 )
 
 func newTestAccount(name string, available int64, enabled bool) *Account {
@@ -228,7 +230,7 @@ func TestLocalExpiryDoesNotBlockRotation(t *testing.T) {
 	p := New("")
 	p.SetOptions(Options{Strategy: "round_robin", StickyTTL: 1800})
 	a := newTestAccount("aged", 500, true)
-	a.ExpireAt = time.Now().Add(-6 * time.Hour).Unix()  // 本地「已过期」
+	a.ExpireAt = time.Now().Add(-6 * time.Hour).Unix()         // 本地「已过期」
 	a.ObtainedAt = time.Now().Add(-15 * 24 * time.Hour).Unix() // 已服役 15 天
 	p.Add(a)
 
@@ -1041,5 +1043,43 @@ func TestDailyAccountingSurvivesRestart(t *testing.T) {
 	p3.ApplyState()
 	if a2.DailyConsumed() != 0 || a2.PermBurnedToday() != 0 {
 		t.Errorf("昨天的账不该读成今天：%d / %d", a2.DailyConsumed(), a2.PermBurnedToday())
+	}
+}
+
+// TestInviteAndActivationPersist 邀请码与激活状态都是长期事实（激活一次性），
+// 必须落盘：否则每次重启都要重新去上游扫一遍（199 个号 = 199 次请求）。
+func TestInviteAndActivationPersist(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestAccount("a", 500, true)
+	a.SetInvites([]upstream.InviteCode{{Code: "Q7959Z", Status: "active", Used: 3, Max: 20}})
+	yes := true
+	a.SetActivation(&upstream.Activation{Activated: yes, Applied: "4FQAYF"})
+	if err := SaveAccount(dir, a); err != nil {
+		t.Fatalf("落盘失败: %v", err)
+	}
+	back, err := LoadAccounts(dir)
+	if err != nil || len(back) != 1 {
+		t.Fatalf("回读失败: %v %d", err, len(back))
+	}
+	b := back[0]
+	if inv := b.Invite(); inv.Code != "Q7959Z" || inv.Used != 3 || inv.Max != 20 {
+		t.Errorf("邀请码未落盘: %+v", inv)
+	}
+	if act := b.IsActivated(); act == nil || !*act {
+		t.Errorf("激活状态未落盘: %v", act)
+	}
+	if b.AppliedInvite != "4FQAYF" {
+		t.Errorf("已绑定的码未落盘: %q", b.AppliedInvite)
+	}
+
+	// 没查过的号必须是 nil（未知），不能默认成 false —— 否则面板会把
+	// "没扫过"的号算进可绑定名单，而绑定不可逆。
+	fresh := &Account{Name: "fresh", Enabled: true, Session: "s"}
+	if fresh.IsActivated() != nil {
+		t.Error("没查过的号应为未知（nil）")
+	}
+	fresh.SetActivation(nil) // 网络失败的调用方可能传 nil
+	if fresh.IsActivated() != nil {
+		t.Error("nil 结果不该改状态")
 	}
 }

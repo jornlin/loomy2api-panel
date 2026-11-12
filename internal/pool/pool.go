@@ -657,9 +657,9 @@ func (p *Pool) stateSnapshot() map[string]any {
 			"quotaAt":      a.QuotaAt,
 			// 当日记账也落盘：否则重启后「今日赠送剩余 / 今日永久消耗」从零起算，
 			// 面板上的「今日」名不副实。跨日由 dayKey 判定，旧数据不会被当今天。
-			"dayKey":       a.rt.dayKey,
+			"dayKey":        a.rt.dayKey,
 			"dailyConsumed": a.rt.dailyConsumed,
-			"permBurned":   a.rt.permBurned,
+			"permBurned":    a.rt.permBurned,
 		}
 	}
 	return map[string]any{

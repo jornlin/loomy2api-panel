@@ -577,7 +577,7 @@ $('btnLogout').onclick = () => {
 };
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', invites: '邀请码', models: '模型与档位', config: '配置', logs: '运行日志' };
 function go(v) {
   navSet(false);
   view = v;
@@ -589,6 +589,7 @@ function go(v) {
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
+  if (v === 'invites') loadInvites();
 }
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
 /* 首次进入延到本轮脚本求值之后再 go()。
@@ -1404,6 +1405,7 @@ const CFG_MAP = {
   session_renew_before_days: 'session_renew_before_days',
   session_probe_seconds: 'session_probe_seconds', session_drop_hits: 'session_drop_hits',
   daily_tail_points: 'daily_tail_points',
+  new_account_invite_code: 'new_account_invite_code',
   keepalive_min_tokens: 'keepalive_min_tokens',
   soft_rate_base_seconds: 'soft_rate_base_seconds', soft_rate_max_seconds: 'soft_rate_max_seconds',
   cooldown_seconds: 'cooldown_seconds', not_found_cooldown_seconds: 'not_found_cooldown_seconds',
@@ -2078,9 +2080,157 @@ function renderUsageChart(hourly) {
   host.innerHTML = out;
 }
 
+/* ── 邀请码 ───────────────────────────────────────────────────────── */
+/* 上游只给三样：自己的码 + usedCount（first-login）、激活状态 + 已绑的码
+   （GET /points/activation）、绑定（POST，一次性不可逆）。所以这一页的读部分
+   全走本地快照，只有「扫描激活状态」才打上游，绑定必须先在页面上看得见状态。 */
+let INV = null;
+
+function invTag(a) {
+  if (a.activated === null || a.activated === undefined) {
+    return '<span class="tag mute" title="还没扫描过；绑定前必须先扫描，否则不会把它算进可绑名单">未查询</span>';
+  }
+  return a.activated
+    ? '<span class="tag ok" title="已激活，绑定是一次性的，再绑无收益">已激活</span>'
+    : '<span class="tag warn" title="未激活：可以绑定邀请码">未激活</span>';
+}
+
+function renderInvites(d) {
+  INV = d || {};
+  const sm = INV.summary || {};
+  $('invCodes').textContent = fmtTok(sm.with_code || 0);
+  $('invUsed').textContent = fmtTok(sm.used_total || 0);
+  $('invSlots').textContent = fmtTok(sm.slots_left || 0);
+  $('invActivated').textContent = fmtTok(sm.activated || 0);
+  $('invUnactivated').textContent = fmtTok(sm.unactivated || 0);
+  $('invUnknown').textContent = fmtTok(sm.unknown || 0);
+  const note = '共 ' + (sm.accounts || 0) + ' 个号 · 每号 1 个码（上限 20）'
+    + (INV.new_account_invite_code ? ' · 新号默认邀请码 ' + INV.new_account_invite_code : '');
+  $('invNote').textContent = note;
+  $('invNote').title = note;
+
+  const rows = (INV.accounts || []).slice().sort((x, y) => (y.invite && y.invite.used || 0) - (x.invite && x.invite.used || 0));
+  LAST.inv = rows;
+  const page = pgApply('invBody', 'inv', rows);
+  const tb = $('invBody');
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="8"><div class="empty">账号池是空的</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = page.map(a => {
+    const c = a.invite || {};
+    const used = Number(c.used || 0), max = Number(c.max || 0);
+    const full = max > 0 && used >= max;
+    const usedCell = max ? (used + ' / ' + max + (full ? ' <span class="tag bad">已满</span>' : '')) : '—';
+    const st = c.status ? esc(c.status) : '—';
+    return '<tr>' +
+      '<td class="mark" aria-hidden="true"><i></i></td>' +
+      '<td><div class="nm">' + remarkName(a.name, esc(a.name)) + '</div>' +
+      (a.enabled ? '' : '<div class="id">已禁用</div>') + '</td>' +
+      '<td><span class="tag mute" title="点一下复制">' + esc(c.code || '—') + '</span></td>' +
+      '<td class="num">' + usedCell + '</td>' +
+      '<td>' + st + '</td>' +
+      '<td>' + invTag(a) + '</td>' +
+      '<td>' + (a.applied_invite ? '<span class="tag mute">' + esc(a.applied_invite) + '</span>' : '<span class="muted">—</span>') + '</td>' +
+      '<td class="acts">' +
+      (a.activated === false
+        ? '<button class="xs primary" data-inv="bind" data-u="' + esc(a.name) + '">用上面的码绑它</button>'
+        : '') +
+      '<button class="xs ghost" data-inv="redeem" data-u="' + esc(a.name) + '">兑换码</button>' +
+      '</td></tr>';
+  }).join('');
+}
+
+async function loadInvites() {
+  try {
+    renderInvites(await api('invites'));
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+}
+
+async function invScan() {
+  const b = $('btnInvScan');
+  b.disabled = true; b.textContent = '扫描中…';
+  try {
+    const r = await api('invites/scan', { method: 'POST' });
+    toast('激活状态：成功 ' + r.scanned + ' / 失败 ' + r.failed + '，其中已激活 ' + r.activated, r.failed ? 'warn' : 'ok');
+    await loadInvites();
+  } catch (e) {
+    toast(e.message, 'err');
+  } finally {
+    b.disabled = false; b.textContent = '扫描激活状态';
+  }
+}
+
+async function invBind(dry, account) {
+  const code = ($('invCodeInput').value || '').trim();
+  if (!code) { toast('请先填邀请码', 'err'); return; }
+  const body = { code: code, dry_run: dry };
+  if (account) body.account = account;
+  else if (($('invAccInput').value || '').trim()) body.account = $('invAccInput').value.trim();
+  try {
+    const r = await api('invites/bind', { method: 'POST', body: JSON.stringify(body) });
+    if (r.dry_run) {
+      const list = r.will_bind || [];
+      const skip = (r.skipped || []).slice(0, 6).map(s => s.name + '（' + s.reason + '）').join('；');
+      toast('预演：将绑定 ' + list.length + ' 个号' + (list.length ? '（' + list.slice(0, 8).join('、') + (list.length > 8 ? '…' : '') + '）' : '') +
+        (skip ? '；跳过：' + skip : ''), list.length ? 'ok' : 'warn');
+      $('btnInvBind').disabled = list.length === 0;
+      return;
+    }
+    toast('绑定完成：成功 ' + r.bound + ' 个' + (r.failed ? '，失败 ' + r.failed + ' 个' : ''), r.failed ? 'warn' : 'ok');
+    await loadInvites();
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+}
+
+async function invRedeem(account) {
+  const code = ($('redeemCodeInput').value || '').trim();
+  const acc = account || ($('redeemAccInput').value || '').trim();
+  if (!code) { toast('请填兑换码', 'err'); return; }
+  if (!acc) { toast('请指定用哪个账号兑换', 'err'); return; }
+  try {
+    const r = await api('invites/redeem', { method: 'POST', body: JSON.stringify({ code: code, account: acc }) });
+    toast('兑换完成：' + (r.desc || 'ok'), 'ok');
+    await loadInvites();
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+}
+
 $('btnUsage').onclick = loadUsage;
 // 时间范围控件绑定：任何改动（预设切换 / 自定义起止）都重新拉一次用量。
 trangeBind('usRange', loadUsage);
+
+/* 邀请页按钮与行内操作。绑定是写操作，确认框里把「不可逆」和将绑的数量说清楚。 */
+$('btnInvScan').onclick = invScan;
+$('btnInvReload').onclick = loadInvites;
+$('btnInvDry').onclick = () => invBind(true);
+$('btnInvBind').onclick = () => {
+  const code = ($('invCodeInput').value || '').trim();
+  const acc = ($('invAccInput').value || '').trim();
+  if (!code) { toast('请先填邀请码', 'err'); return; }
+  if (!confirm('绑定邀请码是**一次性、不可逆**的：绑定后无法改绑。\n\n将用 ' + code +
+    (acc ? ' 绑定账号 ' + acc : ' 绑定全部「未激活」的号（状态未知的会被跳过）') +
+    '\n\n建议先点「预演」看一眼名单。确认继续？')) return;
+  invBind(false);
+};
+$('btnRedeem').onclick = () => invRedeem();
+$('invBody').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-inv]');
+  if (!b) return;
+  const u = b.dataset.u;
+  if (b.dataset.inv === 'bind') {
+    $('invCodeInput').value = (LAST.inv.find(x => x.name === u) || {}).invite?.code || ($('invCodeInput').value || '');
+    $('invAccInput').value = u;
+    toast('已填入 ' + u + '，确认无误后点「确认绑定」', 'ok');
+    return;
+  }
+  $('redeemAccInput').value = u;
+  toast('已选择账号 ' + u + '，填入兑换码后点「兑换」', 'ok');
+});
 
 async function loadUsage() {
   const q = trangeQuery('usRange', true);

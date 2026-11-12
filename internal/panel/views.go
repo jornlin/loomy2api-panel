@@ -114,16 +114,16 @@ func (p *Panel) packagesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	accounts := p.pool.All()
 	type acctRow struct {
-		UID             string           `json:"uid"`
-		Nickname        string           `json:"nickname"`
-		Remain          int64            `json:"remain"`
-		Size            int64            `json:"size"`
-		Packages        []map[string]any `json:"packages"`
-		InvitationCodes []map[string]any `json:"invitation_codes,omitempty"`
-		DailyCycleDate  string           `json:"daily_cycle_date,omitempty"`
-		CheckinDone     bool             `json:"checkin_done"`
-		QuotaUpdatedAt  int64            `json:"quota_updated_at"`
-		Error           string           `json:"error,omitempty"`
+		UID             string                `json:"uid"`
+		Nickname        string                `json:"nickname"`
+		Remain          int64                 `json:"remain"`
+		Size            int64                 `json:"size"`
+		Packages        []map[string]any      `json:"packages"`
+		InvitationCodes []upstream.InviteCode `json:"invitation_codes,omitempty"`
+		DailyCycleDate  string                `json:"daily_cycle_date,omitempty"`
+		CheckinDone     bool                  `json:"checkin_done"`
+		QuotaUpdatedAt  int64                 `json:"quota_updated_at"`
+		Error           string                `json:"error,omitempty"`
 	}
 	out := make([]acctRow, len(accounts))
 	// 并发 8：实测单账号约 0.33s（3 个上游串行），3 并发时 136 账号要 15s。
@@ -165,17 +165,9 @@ func (p *Panel) packagesHandler(w http.ResponseWriter, r *http.Request) {
 			row.QuotaUpdatedAt = q.RefreshedAt
 			row.DailyCycleDate = q.CycleDate
 			row.CheckinDone = a.CheckinDone()
-			if fl, err := p.upstream.FirstLogin(ctx, a.Session); err == nil {
-				if data, ok := fl["data"].(map[string]any); ok {
-					if codes, ok := data["invitationCodes"].([]any); ok {
-						for _, c := range codes {
-							if m, ok := c.(map[string]any); ok {
-								row.InvitationCodes = append(row.InvitationCodes, m)
-							}
-						}
-					}
-				}
-			}
+			// 邀请码直接读账号上已经落地的数据（额度刷新时 first-login 顺带更新），
+			// 不在这里每号再打一次上游 —— 邀请页是同一份数据的另一个视图。
+			row.InvitationCodes = a.Invites
 			out[i] = row
 		}(i, a)
 	}

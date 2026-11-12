@@ -13,6 +13,7 @@
 //   - 标记形态：prompt_tokens 涨到 109381（158334 字符 base64 被当纯文本内联），
 //     模型答「无法解码或识别其中的画面内容」；
 //   - www 图片 URL 形态（不转标记、原样透传 image_url）：prompt_tokens 只涨到 246，答对。
+//
 // 所以把通配收紧成 **显式白名单**：只有 image_tag_models 里列到的模型才转标记，
 // 默认空 = 一律透传标准 image_url。要恢复旧行为，把模型 id 填进 image_tag_models。
 package server

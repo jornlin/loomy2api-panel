@@ -108,6 +108,11 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/checkin_all", p.withAuth(p.checkinAll))
 	p.mux.HandleFunc("POST /panel/api/accounts/{name}/onboarding", p.withAuth(p.onboardingAccount))
 	p.mux.HandleFunc("POST /panel/api/onboarding_all", p.withAuth(p.onboardingAll))
+	// 邀请码：查看（本地）/ 扫描激活状态（打上游，只读）/ 绑定（不可逆，默认预演）/ 兑换码
+	p.mux.HandleFunc("GET /panel/api/invites", p.withAuth(p.inviteAccounts))
+	p.mux.HandleFunc("POST /panel/api/invites/scan", p.withAuth(p.inviteScan))
+	p.mux.HandleFunc("POST /panel/api/invites/bind", p.withAuth(p.inviteBind))
+	p.mux.HandleFunc("POST /panel/api/invites/redeem", p.withAuth(p.inviteRedeem))
 	p.mux.HandleFunc("GET /panel/api/dead_models", p.withAuth(p.deadModelsHandler))
 	p.mux.HandleFunc("POST /panel/api/dead_models/{model}/clear", p.withAuth(p.clearDeadModel))
 
@@ -404,7 +409,13 @@ func (p *Panel) addAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	p.persist(acc)
 	p.Logf("新增账号 %s（登录态 %v）", acc.Name, acc.HasSession())
-	go p.checkinAndRefresh(acc)
+	// 新号归因：带上配置的邀请码做一次首登（奖励归被邀请人 = 新号自己）。
+	// 老号再调是幂等空操作（激活一次性），不会改归属。
+	if code := strings.TrimSpace(p.cfg.NewAccountInviteCode); code != "" {
+		go p.claimInviteForNewAccount(acc, code)
+	} else {
+		go p.checkinAndRefresh(acc)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "account": acc.Public()})
 }
 
@@ -462,7 +473,7 @@ func (p *Panel) checkinAccount(w http.ResponseWriter, r *http.Request) {
 			"permanent_balance": res.PermanentBalance,
 			"current_balance":   res.CurrentBalance,
 			"daily_cycle_date":  res.CycleDate,
-			"invitation_codes":  res.InvitationCodes,
+			"invitation_codes":  res.Invitations,
 		},
 	})
 }
@@ -874,8 +885,8 @@ func poolOptions(cfg *config.Config) pool.Options {
 		SessionProbeSeconds: float64(cfg.SessionProbeSeconds),
 		SessionDropHits:     cfg.SessionDropHits,
 		DailyTailPoints:     int64(cfg.DailyTailPoints),
-		PreferDaily:      cfg.PreferDaily,
-		DeadModelTTL:     time.Duration(cfg.DeadModelTTLDays) * 24 * time.Hour,
+		PreferDaily:         cfg.PreferDaily,
+		DeadModelTTL:        time.Duration(cfg.DeadModelTTLDays) * 24 * time.Hour,
 	}
 }
 

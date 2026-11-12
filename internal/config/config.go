@@ -80,14 +80,14 @@ func (m Model) IsImage() bool { return strings.EqualFold(m.Type, "image") }
 
 // Config 全量配置。字段名即 config.json 的键名（独立结构体便于面板表单绑定）。
 type Config struct {
-	Listen    string   `json:"listen"`
-	APIKeys   []string `json:"api_keys"` // 空 = 不鉴权；面板登录也用这把
+	Listen  string   `json:"listen"`
+	APIKeys []string `json:"api_keys"` // 空 = 不鉴权；面板登录也用这把
 	// ImageTagModels 需要把 data URI 图片转成 <image_base64> 标记的模型（子串匹配）。
 	// 默认空 = 一律透传标准 image_url；详见 internal/server/imgtag.go 的实测依据。
 	ImageTagModels []string `json:"image_tag_models"`
-	AuthDir   string   `json:"auth_dir"`
-	StateFile string   `json:"state_file"`
-	LogDir    string   `json:"log_dir"`
+	AuthDir        string   `json:"auth_dir"`
+	StateFile      string   `json:"state_file"`
+	LogDir         string   `json:"log_dir"`
 
 	Upstream     string `json:"upstream"`
 	AccountBase  string `json:"account_base"`
@@ -113,23 +113,27 @@ type Config struct {
 	BreakerBaseSeconds  int `json:"breaker_cooldown_seconds"`
 	BreakerMaxSeconds   int `json:"breaker_cooldown_max_seconds"`
 
-	Strategy            string `json:"strategy"`
-	PickTopN            int    `json:"pick_top_n"`
-	MaxInFlight         int    `json:"max_inflight_per_account"`
-	StickyTTLSeconds    int    `json:"sticky_ttl_seconds"`
-	StickyMaxEntries    int    `json:"sticky_max_entries"`
+	Strategy         string `json:"strategy"`
+	PickTopN         int    `json:"pick_top_n"`
+	MaxInFlight      int    `json:"max_inflight_per_account"`
+	StickyTTLSeconds int    `json:"sticky_ttl_seconds"`
+	StickyMaxEntries int    `json:"sticky_max_entries"`
 	// SessionNoteDays 登录态役龄播报阈值（天）：役龄到点就在日志里报一次。
 	//
 	// json 键沿用 `session_renew_before_days`（历史键名，面板表单与线上 config.json
 	// 都在用，改名会凭空多一次迁移）；语义已从「剩余 N 天告警」改为「已服役 N 天播报」——
 	// 本地 expireAt 是估计值，没有「剩余」可言，见 pool 包注释。
-	SessionNoteDays     int    `json:"session_renew_before_days"`
-	QuotaRefreshMinutes int    `json:"quota_refresh_minutes"`
+	SessionNoteDays     int `json:"session_renew_before_days"`
+	QuotaRefreshMinutes int `json:"quota_refresh_minutes"`
+	// NewAccountInviteCode 加新号时用的邀请码（空 = 不做归因）。
+	// 邀请码只在"首次登录/激活"那一次生效，且绑定不可逆，所以归因必须发生在加号时；
+	// 上游的奖励是给**被邀请人**的（实测 5000 分/次），也就是新号自己多得 5000。
+	NewAccountInviteCode string `json:"new_account_invite_code"`
 	// SessionProbeSeconds 登录态存疑窗口（秒）：上游回过 401 后先出池这么久等复核。
 	SessionProbeSeconds int `json:"session_probe_seconds"`
 	// SessionDropHits 连续 401 达到几次直接判死（复核拿不到结论时的兜底）。
 	SessionDropHits int `json:"session_drop_hits"`
-	BalanceFloor        int    `json:"balance_floor"` // 可用积分低于此值停止接单（0=关闭）
+	BalanceFloor    int `json:"balance_floor"` // 可用积分低于此值停止接单（0=关闭）
 	// DailyTailPoints 每日赠送余额低于此值就当作「已用尽」，选号不再用它。
 	// 单笔请求的实际消耗只有发出去才知道（实测中位 10 分、p99 38、最大 402），
 	// 余量只剩几十的号一旦中选，超出部分必然记到永久积分上；留条尾巴不碰更划算
@@ -145,7 +149,7 @@ type Config struct {
 	StrictModelCheck bool `json:"strict_model_check"`
 	// DeadModelTTLDays 上游回 404「模型暂未开放」时，把该模型记多久（天）。
 	// 期间 /v1/models 不列它、请求直接 404、不打上游；0 = 用内置默认 30 天。
-	DeadModelTTLDays   int    `json:"dead_model_ttl_days"`
+	DeadModelTTLDays int `json:"dead_model_ttl_days"`
 	// UsageMaxEntries 台账内存保留条数：**它同时决定了用量页能看到的时长上限**
 	// （面板只按内存汇总）。每条约 400B，实测繁忙部署单日 4 万+ 请求 —— 2 万条
 	// 只覆盖几小时，「今天 / 近 7 天」会被静默截断成同一小段。默认 5 万条
@@ -190,24 +194,25 @@ func Defaults() *Config {
 		BreakerBaseSeconds:  60,
 		BreakerMaxSeconds:   1800,
 
-		Strategy:            "weighted",
-		PickTopN:            5,
-		StickyTTLSeconds:    1800,
-		StickyMaxEntries:    2000,
-		SessionNoteDays:     14, // = 客户端申请的登录态时长，超过它就该留意补号节奏
-		QuotaRefreshMinutes: 30,
-		SessionProbeSeconds: 120,
-		SessionDropHits:     3,
-		BalanceFloor:        0,
-		PreferDaily:         true,
-		DailyTailPoints:     100,
-		StrictModelCheck:    true,
-		DeadModelTTLDays:    30,
-		UsageMaxEntries:     50000,
-		LogRequests:         true,
-		SendClientInfo:      true,
-		IdentityMode:        "per_account",
-		SessionsFromClient:  true,
+		Strategy:             "weighted",
+		PickTopN:             5,
+		StickyTTLSeconds:     1800,
+		StickyMaxEntries:     2000,
+		SessionNoteDays:      14, // = 客户端申请的登录态时长，超过它就该留意补号节奏
+		QuotaRefreshMinutes:  30,
+		NewAccountInviteCode: "",
+		SessionProbeSeconds:  120,
+		SessionDropHits:      3,
+		BalanceFloor:         0,
+		PreferDaily:          true,
+		DailyTailPoints:      100,
+		StrictModelCheck:     true,
+		DeadModelTTLDays:     30,
+		UsageMaxEntries:      50000,
+		LogRequests:          true,
+		SendClientInfo:       true,
+		IdentityMode:         "per_account",
+		SessionsFromClient:   true,
 	}
 }
 

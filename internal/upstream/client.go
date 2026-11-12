@@ -324,6 +324,9 @@ type Quota struct {
 	DailyUsed   *int64 // 当日已消耗（first-login.dailyConsumed）
 	CycleDate   string // 每日额度所属日期，形如 2026-10-21（first-login.dailyCycleDate）
 	RefreshedAt int64  // 快照取得时间（unix 秒）
+	// Invitations 这个号**自己的**邀请码（first-login.invitationCodes）。
+	// 每号一个，带 usedCount/maxUses；只有 first-login 会下发，records 不给。
+	Invitations []InviteCode
 }
 
 // available 取可用总额；上游没给 availableBalance 时按 balance+daily 估。
@@ -387,6 +390,95 @@ func (c *Client) ProbeSession(ctx context.Context, session string) (int, string)
 	return resp.Status, string(raw)
 }
 
+// InviteCode 一个邀请码（上游 first-login 的 invitationCodes 元素）。
+//
+// 字段名对齐上游 JSON，面板可以直接把它塞进响应体。
+type InviteCode struct {
+	Code   string `json:"inviteCode"`
+	Status string `json:"status"` // active 等
+	Used   int64  `json:"usedCount"`
+	Max    int64  `json:"maxUses"` // 上游每号上限 20
+}
+
+// parseInviteCodes 从 first-login 的 data 里取邀请码列表。
+func parseInviteCodes(data map[string]any) []InviteCode {
+	list, _ := data["invitationCodes"].([]any)
+	out := make([]InviteCode, 0, len(list))
+	for _, it := range list {
+		m, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		out = append(out, InviteCode{
+			Code:   str(m["inviteCode"]),
+			Status: str(m["status"]),
+			Used:   int64(num(m["usedCount"])),
+			Max:    int64(num(m["maxUses"])),
+		})
+	}
+	return out
+}
+
+// Activation 激活（邀请）状态：GET /points/activation。
+//
+// 实测响应：{"code":"000000","data":{"activated":true,"appliedInvitationCode":"4FQAYF"}}。
+// 绑定是一次性的，所以 activated=true 之后再用别的码绑也不会有收益。
+type Activation struct {
+	Activated bool   `json:"activated"`
+	Applied   string `json:"appliedInvitationCode"`
+}
+
+// Activation 查询激活状态（只读）。返回 ErrNoSession 之外的错误时调用方按网络问题处理。
+func (c *Client) Activation(ctx context.Context, session string) (*Activation, error) {
+	obj, status, err := c.GetJSON(ctx, "points/activation", session)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("/points/activation HTTP %d", status)
+	}
+	data := mapOfAny(obj["data"])
+	if data == nil {
+		data = obj
+	}
+	return &Activation{
+		Activated: boolOf(data["activated"]),
+		Applied:   str(data["appliedInvitationCode"]),
+	}, nil
+}
+
+// BindInvite 绑定邀请码：POST /points/activation body={inviteCode, deviceId?}。
+//
+// 客户端语义（Python 版注释 + 客户端 JS 一致）：带校园设备号时会一并上报。
+// **一次性、不可逆** —— 已激活的号再绑不会有收益，调用方必须先确认激活状态。
+func (c *Client) BindInvite(ctx context.Context, session, inviteCode, deviceID string) (map[string]any, error) {
+	body := map[string]any{"inviteCode": strings.TrimSpace(inviteCode)}
+	if d := strings.TrimSpace(deviceID); d != "" {
+		body["deviceId"] = d
+	}
+	obj, status, err := c.PostJSON(ctx, "points/activation", session, body, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("/points/activation HTTP %d", status)
+	}
+	return obj, nil
+}
+
+// Redeem 兑换积分码：POST /points/redemption-codes/redeem body={code}。
+func (c *Client) Redeem(ctx context.Context, session, code string) (map[string]any, error) {
+	obj, status, err := c.PostJSON(ctx, "points/redemption-codes/redeem", session,
+		map[string]any{"code": strings.TrimSpace(code)}, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, fmt.Errorf("/points/redemption-codes/redeem HTTP %d", status)
+	}
+	return obj, nil
+}
+
 // Quota 查询积分余额。上游只认 camelCase 的 pageSize（下划线会被静默忽略）。
 //
 // 两个端点都打：records 给余额，first-login 给每日额度口径。first-login 是
@@ -417,6 +509,7 @@ func (c *Client) Quota(ctx context.Context, session string) (*Quota, error) {
 		}
 		q.Permanent = ptrI64(data["permanentBalance"])
 		q.DailyQuota = ptrI64(data["dailyQuota"])
+		q.Invitations = parseInviteCodes(data)
 		q.DailyUsed = ptrI64(data["dailyConsumed"])
 		q.CycleDate = str(data["dailyCycleDate"])
 		if q.Balance == nil {
@@ -532,7 +625,23 @@ func (c *Client) Points(ctx context.Context, session string, pages int) (map[str
 
 // FirstLogin 触发每日首次登录奖励（幂等：已领过返回 alreadyProcessed）。
 func (c *Client) FirstLogin(ctx context.Context, session string) (map[string]any, error) {
-	obj, status, err := c.PostJSON(ctx, "points/first-login", session, map[string]any{}, nil)
+	return c.FirstLoginWith(ctx, session, "", "")
+}
+
+// FirstLoginWith 同上，但可以带上邀请码 —— **新号首登即归因**的唯一时机。
+//
+// 客户端语义：带 inviteCode 时**必须**同时带 deviceId（校园风控设备号），
+// 两者成对出现；响应里会多出 registerReward / inviteeReward / inviterReward。
+// 对已激活的号再带码没有收益（激活一次性），所以只该用于新号。
+func (c *Client) FirstLoginWith(ctx context.Context, session, inviteCode, deviceID string) (map[string]any, error) {
+	body := map[string]any{}
+	if code := strings.TrimSpace(inviteCode); code != "" {
+		body["inviteCode"] = code
+		if d := strings.TrimSpace(deviceID); d != "" {
+			body["deviceId"] = d
+		}
+	}
+	obj, status, err := c.PostJSON(ctx, "points/first-login", session, body, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -544,15 +653,15 @@ func (c *Client) FirstLogin(ctx context.Context, session string) (map[string]any
 
 // CheckinResult 一次「签到/领取每日积分」的结构化结果（抓包核对过的字段）。
 type CheckinResult struct {
-	AlreadyProcessed bool             // 本周期已领过（重复调用不会重复给分）
-	CurrentBalance   int64            // 当前可用总额
-	PermanentBalance int64            // 普通长期积分
-	DailyBalance     int64            // 每日赠送剩余
-	DailyQuota       int64            // 每日赠送上限（登录后自动刷新为 5000）
-	DailyConsumed    int64            // 当日已消耗
-	CycleDate        string           // 每日额度所属日期
-	InvitationCodes  []map[string]any // 邀请码列表（inviteCode/usedCount/maxUses/status）
-	Quota            *Quota           // 可直接喂给 pool.Account.SetQuota 的快照
+	AlreadyProcessed bool         // 本周期已领过（重复调用不会重复给分）
+	CurrentBalance   int64        // 当前可用总额
+	PermanentBalance int64        // 普通长期积分
+	DailyBalance     int64        // 每日赠送剩余
+	DailyQuota       int64        // 每日赠送上限（登录后自动刷新为 5000）
+	DailyConsumed    int64        // 当日已消耗
+	CycleDate        string       // 每日额度所属日期
+	Invitations      []InviteCode // 邀请码列表（inviteCode/usedCount/maxUses/status）
+	Quota            *Quota       // 可直接喂给 pool.Account.SetQuota 的快照
 }
 
 // Checkin 模拟客户端每日登录领积分：打的正是官方客户端每次启动都会调的
@@ -560,7 +669,16 @@ type CheckinResult struct {
 //   - 每日赠送积分在每日登录后自动刷新为 5000；
 //   - 消耗顺序：活动/兑换码积分 → 普通长期积分（上游侧执行，网关只镜像展示）。
 func (c *Client) Checkin(ctx context.Context, session string) (*CheckinResult, error) {
-	obj, err := c.FirstLogin(ctx, session)
+	return c.checkin(ctx, session, "", "")
+}
+
+// CheckinWithInvite 同上，但首登时带上邀请码（新号归因用）。
+func (c *Client) CheckinWithInvite(ctx context.Context, session, inviteCode, deviceID string) (*CheckinResult, error) {
+	return c.checkin(ctx, session, inviteCode, deviceID)
+}
+
+func (c *Client) checkin(ctx context.Context, session, inviteCode, deviceID string) (*CheckinResult, error) {
+	obj, err := c.FirstLoginWith(ctx, session, inviteCode, deviceID)
 	if err != nil {
 		return nil, err
 	}
@@ -577,13 +695,7 @@ func (c *Client) Checkin(ctx context.Context, session string) (*CheckinResult, e
 		DailyConsumed:    int64(num(data["dailyConsumed"])),
 		CycleDate:        str(data["dailyCycleDate"]),
 	}
-	if list, ok := data["invitationCodes"].([]any); ok {
-		for _, it := range list {
-			if m, ok := it.(map[string]any); ok {
-				res.InvitationCodes = append(res.InvitationCodes, m)
-			}
-		}
-	}
+	res.Invitations = parseInviteCodes(data)
 	// first-login 自带全部额度口径，直接构造快照（不必再打 records）。
 	res.Quota = &Quota{
 		Balance:     ptrI64(data["permanentBalance"]),
@@ -594,6 +706,7 @@ func (c *Client) Checkin(ctx context.Context, session string) (*CheckinResult, e
 		DailyUsed:   ptrI64(data["dailyConsumed"]),
 		CycleDate:   res.CycleDate,
 		RefreshedAt: time.Now().Unix(),
+		Invitations: res.Invitations,
 	}
 	return res, nil
 }

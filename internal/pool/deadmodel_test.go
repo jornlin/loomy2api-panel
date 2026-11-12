@@ -120,7 +120,7 @@ func TestPreferDailyTier(t *testing.T) {
 	today := todayKey()
 
 	a := &Account{Name: "daily", DailyBalance: &big, Permanent: &permOnly,
-		DailyCycleDate: today}                                            // 档 0
+		DailyCycleDate: today} // 档 0
 	b := &Account{Name: "perm", DailyBalance: &permOnly, Permanent: &big} // 档 1
 	c := &Account{Name: "unknown"}                                        // 档 2
 	got := preferDailyTier([]*Account{a, b, c}, 0)
