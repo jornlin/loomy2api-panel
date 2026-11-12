@@ -1718,6 +1718,11 @@ function normalizeUsage(d) {
     by_model: byKey(w.by_model),
     hourly: d.hourly || [],
     from: w.from, to: w.to,
+    // 台账内存上限会把窗口截断（请求量大时「近 7 天」其实只有几小时）：
+    // 把真实起点与上限一起带出来，别让上面那排统计假装覆盖了整个窗口。
+    truncated: !!d.truncated,
+    oldest: d.oldest || 0,
+    maxEntries: d.max_entries || 0,
   };
 }
 
@@ -1752,7 +1757,14 @@ function renderUsage(d) {
     ? new Date(usageData.from * 1000).toLocaleString('zh-CN', { hour12: false }).slice(0, 16) +
       ' → ' + (usageData.to ? new Date(usageData.to * 1000).toLocaleString('zh-CN', { hour12: false }).slice(0, 16) : '现在')
     : '';
-  const note = ((rangeEcho || winLabel) + ' · ' + (usageData.hourly || []).length + ' 个分桶');
+  let note = ((rangeEcho || winLabel) + ' · ' + (usageData.hourly || []).length + ' 个分桶');
+  if (usageData.truncated && usageData.oldest) {
+    // 手拼月/日 时:分：toLocaleString 的切片在不同 locale 下会带上多余的冒号或补零差异。
+    const dt = new Date(usageData.oldest * 1000);
+    const p2 = n => String(n).padStart(2, '0');
+    const since = (dt.getMonth() + 1) + '/' + dt.getDate() + ' ' + p2(dt.getHours()) + ':' + p2(dt.getMinutes());
+    note += ' · 台账只覆盖 ' + since + ' 起，更早的没进内存（上限 ' + fmtTok(usageData.maxEntries) + ' 条，可调大 usage_max_entries）';
+  }
   $('usNote').textContent = note;
   $('usNote').title = note; // 窄屏单行截断时靠悬停看全
 

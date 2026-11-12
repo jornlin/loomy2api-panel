@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -318,5 +319,123 @@ func TestSaveConfigSetAPIKey(t *testing.T) {
 	}
 	if len(reloaded.APIKeys) != 1 || reloaded.APIKeys[0] != "sk-newkey123456" {
 		t.Errorf("磁盘上的 api_keys = %v", reloaded.APIKeys)
+	}
+}
+
+// TestUsageWindowFollowsRange 切时间范围时，「用量总览」上面那排统计（卡片 / 明细 /
+// 积分构成都吃同一个 window）必须跟着变。
+//
+// 回归的坑：handler 里只有「显式区间 / 默认」两条分支，hours=24|72|168|720 这些
+// 滚动预设全部落到默认分支 → 窗口恒为 7 天，只有时序图和按小时表跟着变，
+// 卡片数字纹丝不动。
+func TestUsageWindowFollowsRange(t *testing.T) {
+	pl, _ := newTestPanel(t)
+	now := time.Now().Unix()
+	// 三条记录：10 小时前 / 30 小时前 / 100 小时前。
+	for _, age := range []int64{10, 30, 100} {
+		pl.ledger.Record(usage.Record{
+			Time: now - age*3600, Account: "acc1", Model: "m", Status: 200,
+			Prompt: 10, Completion: 5, Points: 3,
+		})
+	}
+	cases := []struct {
+		query string
+		want  float64
+	}{
+		{"hours=24", 1},
+		{"hours=72", 2},
+		{"hours=168", 3},
+		{"hours=720", 3},
+		{"hours=0", 3},   // 全部历史
+		{"", 3},          // 不给参数：默认 24 小时 → 只有 1 条；见下断言
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/panel/api/usage?"+c.query, nil)
+		w := httptest.NewRecorder()
+		pl.ServeHTTP(w, req)
+		var out struct {
+			Window map[string]any `json:"window"`
+			Hourly []map[string]any `json:"hourly"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			t.Fatalf("%s 响应不是 JSON: %v", c.query, err)
+		}
+		got, _ := out.Window["total"].(float64)
+		want := c.want
+		if c.query == "" { // 默认窗口 = 24 小时
+			want = 1
+		}
+		if got != want {
+			t.Errorf("%q 窗口应含 %v 条，实际 %v（桶 %d 个）", c.query, want, got, len(out.Hourly))
+		}
+		if c.query != "" {
+			if n, err := strconv.Atoi(strings.TrimPrefix(c.query, "hours=")); err == nil &&
+				n > 0 && len(out.Hourly) != n {
+				t.Errorf("%q 时序桶应为 %d 个，实际 %d", c.query, n, len(out.Hourly))
+			}
+		}
+	}
+
+	// 卡片口径必须等于时序桶之和（两者覆盖同一段时间）。
+	req := httptest.NewRequest(http.MethodGet, "/panel/api/usage?hours=72", nil)
+	w := httptest.NewRecorder()
+	pl.ServeHTTP(w, req)
+	var out struct {
+		Window map[string]any   `json:"window"`
+		Hourly []map[string]any `json:"hourly"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	bucketReqs := 0.0
+	for _, h := range out.Hourly {
+		if v, ok := h["requests"].(float64); ok {
+			bucketReqs += v
+		}
+	}
+	if total, _ := out.Window["total"].(float64); bucketReqs != total {
+		t.Errorf("卡片窗口 %v 与时序桶之和 %v 不一致（两者应覆盖同一段时间）", total, bucketReqs)
+	}
+}
+
+// TestUsageReportsTruncatedCoverage 台账内存上限会截断窗口：面板必须能知道
+// 「这个窗口的数据其实只到哪」，否则「近 7 天」会被显示成「近几小时」而毫无提示。
+func TestUsageReportsTruncatedCoverage(t *testing.T) {
+	pl, _ := newTestPanel(t)
+	pl.ledger = usage.New("", 2) // 只留 2 条，方便造截断
+	now := time.Now().Unix()
+	for _, age := range []int64{30, 20, 1} { // 前两条会被挤出去
+		pl.ledger.Record(usage.Record{Time: now - age*3600, Account: "acc1", Model: "m", Status: 200})
+	}
+	req := httptest.NewRequest(http.MethodGet, "/panel/api/usage?hours=24", nil)
+	w := httptest.NewRecorder()
+	pl.ServeHTTP(w, req)
+	var out struct {
+		Window      map[string]any `json:"window"`
+		Oldest      int64          `json:"oldest"`
+		MaxEntries  int            `json:"max_entries"`
+		Truncated   bool           `json:"truncated"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.Truncated {
+		t.Error("近 24 小时的窗口起点早于内存最早记录，应标记为被截断")
+	}
+	if out.Oldest != now-20*3600 {
+		t.Errorf("应报出内存里最早一条的时间，实际 %d", out.Oldest)
+	}
+	if out.MaxEntries != 2 {
+		t.Errorf("应报出台账内存上限，实际 %d", out.MaxEntries)
+	}
+
+	// 窗口完全落在内存覆盖范围内的那一档不该误报截断。
+	req = httptest.NewRequest(http.MethodGet, "/panel/api/usage?hours=1", nil)
+	w = httptest.NewRecorder()
+	pl.ServeHTTP(w, req)
+	out.Truncated = false
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Truncated {
+		t.Error("近 1 小时的数据是完整的，不该报截断")
 	}
 }

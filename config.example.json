@@ -112,8 +112,8 @@
   "quota_refresh_minutes": 30,
   "_quota_refresh_minutes": "后台全量额度刷新间隔（分钟）",
 
-  "usage_max_entries": 20000,
-  "_usage_max_entries": "请求台账内存保留条数（同时逐条追加到 state 同目录 usage.jsonl）",
+  "usage_max_entries": 50000,
+  "_usage_max_entries": "请求台账内存保留条数（同时逐条追加到 state 同目录 usage.jsonl）。它同时决定用量页能看到的时长上限：面板只按内存汇总，每条约 400B，繁忙部署单日 4 万+ 请求，2 万条只覆盖几小时，「今天 / 近 7 天」会被静默截断成同一小段",
 
   "log_requests": true,
   "log_client_info": true,

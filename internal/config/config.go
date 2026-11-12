@@ -146,6 +146,10 @@ type Config struct {
 	// DeadModelTTLDays 上游回 404「模型暂未开放」时，把该模型记多久（天）。
 	// 期间 /v1/models 不列它、请求直接 404、不打上游；0 = 用内置默认 30 天。
 	DeadModelTTLDays   int    `json:"dead_model_ttl_days"`
+	// UsageMaxEntries 台账内存保留条数：**它同时决定了用量页能看到的时长上限**
+	// （面板只按内存汇总）。每条约 400B，实测繁忙部署单日 4 万+ 请求 —— 2 万条
+	// 只覆盖几小时，「今天 / 近 7 天」会被静默截断成同一小段。默认 5 万条
+	// （≈20MB，约一天多）；要看更长窗口就调大，代价是内存与每次汇总的扫描开销。
 	UsageMaxEntries    int    `json:"usage_max_entries"`
 	LogRequests        bool   `json:"log_requests"`
 	SendClientInfo     bool   `json:"log_client_info"`
@@ -199,7 +203,7 @@ func Defaults() *Config {
 		DailyTailPoints:     100,
 		StrictModelCheck:    true,
 		DeadModelTTLDays:    30,
-		UsageMaxEntries:     20000,
+		UsageMaxEntries:     50000,
 		LogRequests:         true,
 		SendClientInfo:      true,
 		IdentityMode:        "per_account",

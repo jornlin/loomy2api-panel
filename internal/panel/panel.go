@@ -220,33 +220,64 @@ func (p *Panel) usageHandler(w http.ResponseWriter, r *http.Request) {
 		to = time.Now().Unix()
 	}
 	// 「全部历史」（hours=0）：窗口与时序都走显式区间 [0,now]——若落到默认分支
-	// 会静默退回 7d/24h（蓝本 issue #121 的同族坑：空查询≠全部）。
+	// 会静默退回默认窗口（蓝本 issue #121 的同族坑：空查询≠全部）。
 	allHistory := hoursSet && hoursReq == 0
+	hours := 24
+	if hoursSet && hoursReq > 0 {
+		hours = hoursReq
+	}
+
+	// 窗口（卡片 / 明细 / 积分构成都吃它）必须跟着时间范围走：
+	//   - from/to 或 hours=0 → 显式区间；
+	//   - hours=N（近 24 小时 / 3 天 / 7 天 / 30 天预设）→ 与下面的时序桶**逐桶对齐**
+	//     的滚动窗口。
+	// 早先的实现在这里只有「显式区间 / 默认」两条分支，滚动预设一律落到默认分支，
+	// 于是窗口恒为 7 天 —— 时序图和按小时表跟着预设变，上面那排统计却纹丝不动
+	// （用户反馈的现象）。对齐到桶而不是严格 now-N 小时，「近 24 小时」的卡片数字
+	// 就等于图上 24 根柱子之和，两个口径不会互相打架。
 	var win *usage.Window
-	switch {
-	case from > 0 || allHistory:
+	if from > 0 || allHistory {
 		win = p.ledger.Range(from, to)
-	default:
-		win = p.ledger.Summary(map[string]int64{"7d": 7 * 86400})["7d"]
+	} else {
+		win = p.ledger.Range(hourWindowStart(hours), to)
 	}
 	// 时序桶：显式区间走 HourlyRange（柱子按用户选的起点排列，「今天」从 00:00
 	// 开始）；其余滚动窗口走 Hourly（服务端整点对齐，与旧行为逐位一致）。
 	var series []map[string]any
-	switch {
-	case from > 0 || allHistory:
+	if from > 0 || allHistory {
 		series = p.ledger.HourlyRange(from, to)
-	default:
-		hours := 24
-		if hoursSet && hoursReq > 0 {
-			hours = hoursReq
-		}
+	} else {
 		series = p.ledger.Hourly(hours)
 	}
+	// 数据覆盖范围：台账只留最近 max 条，请求量大的部署下窗口会被静默截断
+	// （实测 2 万条 ≈ 5 小时，"近 7 天"其实是"近 5 小时"）。把真实起点与被截断
+	// 这件事告诉面板，别让上面那排统计假装覆盖了整个窗口。
+	requestedFrom := int64(0)
+	if from > 0 {
+		requestedFrom = from
+	} else if !allHistory {
+		requestedFrom = hourWindowStart(hours)
+	}
+	oldest := p.ledger.Oldest()
+	truncated := requestedFrom > 0 && oldest > requestedFrom
 	writeJSON(w, http.StatusOK, map[string]any{
-		"window": win,
-		"hourly": series,
-		"models": p.ledger.Models(),
+		"window":      win,
+		"hourly":      series,
+		"models":      p.ledger.Models(),
+		"oldest":      oldest,
+		"max_entries": p.ledger.MaxEntries(),
+		"truncated":   truncated,
 	})
+}
+
+// hourWindowStart 与 Ledger.Hourly(hours) 的第一根柱子对齐的窗口起点：
+// 整点向下取整后往前数 hours-1 个整点。两个口径（卡片 = 区间汇总、
+// 时序 = 整点分桶）因此覆盖同一段时间，卡片数字恒等于图上柱子之和。
+func hourWindowStart(hours int) int64 {
+	if hours < 1 {
+		hours = 1
+	}
+	return time.Now().Truncate(time.Hour).Unix() - int64(hours-1)*3600
 }
 
 func (p *Panel) requests(w http.ResponseWriter, r *http.Request) {

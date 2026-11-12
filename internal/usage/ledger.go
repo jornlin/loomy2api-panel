@@ -88,7 +88,16 @@ func (l *Ledger) loadTail() {
 	defer f.Close()
 
 	// 只读最后一段（按大小截取），避免大文件拖慢启动。
-	const maxBytes = 8 << 20
+	// 读多少要跟着 max 走：固定 8MB 只够约 3 万条，把 usage_max_entries 调大之后
+	// 重启会发现「上限调大了但数据还是那么点」—— 内存上限得配得上读入窗口。
+	// 每条约 400B（含账号/模型/UA 等字符串），留一倍余量。
+	maxBytes := int64(l.max) * 400
+	if maxBytes < 8<<20 {
+		maxBytes = 8 << 20
+	}
+	if maxBytes > 256<<20 {
+		maxBytes = 256 << 20
+	}
 	st, err := f.Stat()
 	if err != nil {
 		return
@@ -114,6 +123,29 @@ func (l *Ledger) loadTail() {
 	}
 	l.records = tail
 }
+
+// Oldest 内存里最早一条记录的时间（空台账返回 0）。
+//
+// 面板用它判断「这个窗口的数据是不是被内存上限截断了」：台账只保留最近 max 条，
+// 请求量大的部署（实测单日 4 万+）下，2 万条只覆盖几小时 —— 不去看这个数，
+// 「近 7 天」会静默显示成「近 5 小时」。
+func (l *Ledger) Oldest() int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.records) == 0 {
+		return 0
+	}
+	oldest := l.records[0].Time
+	for _, r := range l.records {
+		if r.Time < oldest {
+			oldest = r.Time
+		}
+	}
+	return oldest
+}
+
+// MaxEntries 内存保留条数上限（面板拿来解释覆盖范围）。
+func (l *Ledger) MaxEntries() int { return l.max }
 
 // Record 追加一条记录。
 func (l *Ledger) Record(r Record) {
