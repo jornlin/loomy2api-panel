@@ -147,33 +147,46 @@ function pgBtn(key, d, label, dis, on) {
     (dis ? ' disabled' : '') + '>' + label + '</button>';
 }
 
+// pgHtml 分页条内容。
+//
+// 「每页条数」选择器**无条件**渲染，只有页码按钮在单页时省掉：它自己是唯一能改回
+// 条数的地方，一旦跟着分页条一起消失就是死局 —— 实测踩过：选 200 条/页 + 166 个
+// 账号 = 单页，分页条没了，切不回来。
 function pgHtml(key, total, st) {
   const pages = Math.max(1, Math.ceil(total / st.size));
   const cur = st.page;
-  const nums = [];
-  if (pages <= 7) {
-    for (let i = 0; i < pages; i++) nums.push(i);
-  } else {
-    const keep = {};
-    [0, pages - 1, cur - 1, cur, cur + 1].forEach(i => { if (i >= 0 && i < pages) keep[i] = 1; });
-    const arr = Object.keys(keep).map(Number).sort((a, b) => a - b);
-    for (let i = 0; i < arr.length; i++) {
-      if (i && arr[i] - arr[i - 1] > 1) nums.push(-1);
-      nums.push(arr[i]);
+  let nav = '';
+  if (pages > 1) {
+    const nums = [];
+    if (pages <= 7) {
+      for (let i = 0; i < pages; i++) nums.push(i);
+    } else {
+      const keep = {};
+      [0, pages - 1, cur - 1, cur, cur + 1].forEach(i => { if (i >= 0 && i < pages) keep[i] = 1; });
+      const arr = Object.keys(keep).map(Number).sort((a, b) => a - b);
+      for (let i = 0; i < arr.length; i++) {
+        if (i && arr[i] - arr[i - 1] > 1) nums.push(-1);
+        nums.push(arr[i]);
+      }
     }
+    nav = pgBtn(key, 'prev', '‹ 上一页', cur === 0) +
+      nums.map(i => i < 0 ? '<span class="pg-gap">…</span>' : pgBtn(key, i, String(i + 1), false, i === cur)).join('') +
+      pgBtn(key, 'next', '下一页 ›', cur >= pages - 1);
   }
   const sizeOpts = PG_SIZES.map(n =>
     '<option value="' + n + '"' + (n === st.size ? ' selected' : '') + '>' + n + ' 条/页</option>').join('');
-  return '<div class="pg">' +
-    pgBtn(key, 'prev', '‹ 上一页', cur === 0) +
-    nums.map(i => i < 0 ? '<span class="pg-gap">…</span>' : pgBtn(key, i, String(i + 1), false, i === cur)).join('') +
-    pgBtn(key, 'next', '下一页 ›', cur >= pages - 1) +
-    '<span class="pg-info">共 ' + total + ' 条 · 第 ' + (cur + 1) + '/' + pages + ' 页</span>' +
+  return '<div class="pg">' + nav +
+    '<span class="pg-info">共 ' + total + ' 条' +
+    (pages > 1 ? ' · 第 ' + (cur + 1) + '/' + pages + ' 页' : '') + '</span>' +
     '<select class="pg-size" data-pgsize="' + key + '">' + sizeOpts + '</select>' +
     '</div>';
 }
 
-// pgFoot 在表格下方挂/更新分页条；只有一页时移除，避免占位。
+// pgFoot 在表格下方挂/更新分页条；**只有列表为空时**才移除。
+//
+// 早先的「一页装得下就移除」看着省地方，实际是个死局：每页条数的选择器就在这条
+// 上，选了 200 条/页 + 166 个账号 = 单页，分页条消失 → 再也切不回 20 条/页。
+// 所以单页时只省掉页码按钮（见 pgHtml），保留「共 N 条 + 每页条数」。
 //
 // 分页条**不能**放进 <tfoot>：账号表这类宽表在 .tbl-wrap 里横向滚动
 // （实测表 1236px / 容器 927px），tfoot 会跟着表格一起被滚出右边界，等于没有。
@@ -186,7 +199,7 @@ function pgFoot(tbId, key, total, st) {
     // 非表格容器（积分构成的卡片网格）：分页条直接挂在容器后面。
     const id = 'pg-' + key;
     let bar = document.getElementById(id);
-    if (total <= st.size) {
+    if (total === 0) {
       if (bar && bar.parentElement) bar.parentElement.removeChild(bar);
       return;
     }
@@ -207,7 +220,7 @@ function pgFoot(tbId, key, total, st) {
 
   const id = 'pg-' + key;
   let bar = document.getElementById(id);
-  if (total <= st.size) {
+  if (total === 0) {
     if (bar && bar.parentElement) bar.parentElement.removeChild(bar);
     return;
   }

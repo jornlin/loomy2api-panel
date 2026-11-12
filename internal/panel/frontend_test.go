@@ -81,6 +81,34 @@ func TestNoInlineHandlers(t *testing.T) {
 	}
 }
 
+// TestPagerNeverTrapsSizeChoice 分页条不能既是「唯一能改每页条数的地方」、又在
+// 只有一页时整条消失：选了 200 条/页 + 166 个账号 = 单页，分页条没了就再也切不
+// 回来（实测踩过这个死局）。所以：只有列表为空才移除分页条；单页时可以省掉页码
+// 按钮，但「每页条数」选择器必须留着。
+func TestPagerNeverTrapsSizeChoice(t *testing.T) {
+	src := string(appJS)
+	if strings.Contains(src, "total <= st.size") {
+		t.Error("分页条不该因为「一页装得下」就移除 —— 每页条数的选择器会长在上面，一起消失就没法切回")
+	}
+	if !strings.Contains(src, "total === 0") {
+		t.Error("分页条只应在列表为空时移除")
+	}
+	i := strings.Index(src, "function pgHtml(")
+	if i < 0 {
+		t.Fatal("app.js 里找不到 pgHtml")
+	}
+	body := src[i:]
+	if j := strings.Index(body, "\n}"); j > 0 {
+		body = body[:j]
+	}
+	if !strings.Contains(body, "data-pgsize") {
+		t.Error("pgHtml 必须无条件渲染每页条数选择器")
+	}
+	if strings.Contains(body, "if (pages <= 1) return") {
+		t.Error("pgHtml 不该在单页时整体返回，否则选择器跟着消失")
+	}
+}
+
 // TestStatsStripSingleRow：KPI 条靠 auto-fit 排成一行，写死列数会让多出来的格
 // 单独掉到第二行，破坏与基准一致的「单行等分 + 细分割线」。
 func TestStatsStripSingleRow(t *testing.T) {
