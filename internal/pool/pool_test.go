@@ -228,7 +228,7 @@ func TestLocalExpiryDoesNotBlockRotation(t *testing.T) {
 	p := New("")
 	p.SetOptions(Options{Strategy: "round_robin", StickyTTL: 1800})
 	a := newTestAccount("aged", 500, true)
-	a.ExpireAt = time.Now().Add(-6 * time.Hour).Unix()         // 本地「已过期」
+	a.ExpireAt = time.Now().Add(-6 * time.Hour).Unix()  // 本地「已过期」
 	a.ObtainedAt = time.Now().Add(-15 * 24 * time.Hour).Unix() // 已服役 15 天
 	p.Add(a)
 
