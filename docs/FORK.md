@@ -4,8 +4,9 @@
 > 本 fork：[jornlin/loomy2api-panel](https://github.com/jornlin/loomy2api-panel)
 > 分叉基线：`609d437`（上游 `main`，2026-11 初）
 
-9 个提交，分七块：**读图链路修复**（两处）、**面板分页与排序**、**面板性能**、
-**面板错误描述语义**、**登录态判据**、**每日赠送额度优先**、**用量页时间范围**。
+10 个提交，分八块：**读图链路修复**（两处）、**面板分页与排序**、**面板性能**、
+**面板错误描述语义**、**登录态判据**、**每日赠送额度优先**、**用量页时间范围**、
+**邀请码能力**。
 每项后面是当时的实测数据（`136` 个真实账号、图片为同一张已知答案的截图）。
 
 ## 概览
@@ -21,7 +22,7 @@
 | `81364c0` | fix(pool) | 本地「14 天到期」不再作判据；401 先复核再判死 | 11-21 不再一天掉 136 个号 |
 | `0365201` | fix(pool) | 每日赠送额度：本地记账 + 周期日校验 + 跨日即刷 + 粘性让位 | 今日永久消耗 **0 / 44.8 万分** |
 | `8018b47` | fix(pool) | 赠送余额「尾巴保护」：余量低于阈值不再接单 | 尾部溢出 **164 分/天 → 0** |
-| `647c827` | fix(panel) | 用量页切时间范围：统计卡片跟着走 + 台账覆盖范围如实上报 | 168h：**19,411 → 162,922 请求** |
+| `b66860b` | fix(panel) | 用量页切时间范围：统计卡片跟着走 + 台账覆盖范围如实上报 | 168h：**19,411 → 162,922 请求** |
 
 ---
 
@@ -321,6 +322,52 @@ hours=720  → 请求 19411  积分 241337
 
 新增用例：`TestUsageWindowFollowsRange`（四档预设窗口各不相同 + 卡片窗口等于时序桶之和）、
 `TestUsageReportsTruncatedCoverage`（截断标记与真实起点）。
+
+## 10. 邀请码能力：从 loomy2api 移植 + 补齐上游没被用上的两端
+
+loomy2api（Python）有「平台任务」聚合与绑定邀请码，本仓此前只在「积分构成」页把
+邀请码当 tag 露出来。用线上 199 个真号把上游摸清后，按"读的分开做、写的必须先看见状态"移植：
+
+上游只有三样东西（其余全是 404，`points/records` 的 `record_type` 被上游**忽略**）：
+
+| 能力 | 端点 | 实测 |
+|---|---|---|
+| 自己的码 + 使用数量 | `POST /points/first-login` 的 `invitationCodes` | 每号 1 个码，`maxUses` 20；池内 198 个码、已用 199 次 |
+| 激活状态 + 已绑的码 | `GET /points/activation` | `{activated, appliedInvitationCode}` |
+| 绑定 | `POST /points/activation` `{inviteCode, deviceId}` | **一次性、不可逆** |
+| 新号首登归因 | `POST /points/first-login` 带 `{inviteCode, deviceId}` | 两者必须成对 |
+| 兑换码 | `POST /points/redemption-codes/redeem` | Python 有、本仓此前没有 |
+
+搬过来的落地方式：
+
+- **读**：邀请码随每次额度刷新（first-login）写进账号并落盘（重启不用重扫）；激活状态一次
+  性，扫描后落盘。新增「邀请码」页：总览 KPI（码数 / 已用 / 剩余名额 / 已激活 / 未激活 /
+  未知）+ 逐号明细（自己的码、已用/上限、状态、激活、**已绑的码**）+ 扫描按钮（每号 1~2 次
+  只读请求，199 号 17.6s）。
+- **写**：绑定默认**预演**（`dry_run` 缺省为 true），只对「已确认未激活」的号执行；状态未知的
+  一律跳过并说明原因（一次误绑无法回滚）。单号绑定用该号自己的 `campus_device_id`
+  （面板 Identity 本来就是每号一套）。兑换码必须点名账号（分进谁的账要看得见）。
+- **新号归因**：配置 `new_account_invite_code`，加号时做一次带码首登。上游奖励**只给被邀请人**
+  （实测 5000 分/次；抽查被用 14~16 次的码，主人的积分来源里没有任何邀请项），所以这条的
+  收益是"新号自己多得 5000"，不是"老号刷分"。老号再调是幂等空操作。
+
+线上现状（199 个号，2026-11-14）：198 已激活 / 1 未激活 / 0 未知，**所有已激活号都是用池内
+自己的码进来的**（18 个码被使用，最多的 `3VZBRH`←16 个号），剩余名额 3,761。
+
+顺手修的两处：
+- 积分构成页原来每号都打一次 first-login 只为拿邀请码（199 次上游调用 / 13.9s），改成读账号上
+  已落地的数据；
+- 邀请页行字段用面板自有命名（`code/used/max/status`）而不是上游的 `inviteCode/usedCount`——
+  上游命名只留在 `internal/upstream`，前端不跟着漂（这条有断言盯着）。
+
+### 上游没给的（别承诺）
+
+「谁用了我的码」的明细：`record_type` 被忽略、6 条候选路由全 404，只有 `usedCount` 汇总。
+面板上能回答的是反向问题——**每个号是被哪个码邀请进来的**（`applied_invite` 列）。
+
+新增用例：`TestActivationParse`、`TestBindInviteAndRedeemBody`、`TestFirstLoginWithInvite`、
+`TestInviteAndActivationPersist`、`TestInviteOverview`、`TestInviteScan`、
+`TestInviteBindDryRunAndGuard`、`TestInviteBindWrites`、`TestInviteRedeem`。
 
 ---
 
