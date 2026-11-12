@@ -377,6 +377,141 @@ func TestObservedLifetimeRecordedOnce(t *testing.T) {
 	}
 }
 
+// TestDailyTierRejectsStaleSnapshot 第 0 档（今天还有赠送额度）必须同时看余额和
+// 周期日：每日赠送按自然日清零，昨天的余额今天一分不算，而新一天的额度要一次
+// first-login 才到账 —— 只看余额会把流量主动送到「今天还没领到赠送」的号上。
+func TestDailyTierRejectsStaleSnapshot(t *testing.T) {
+	d, perm := int64(4000), int64(1000)
+	stale := &Account{Name: "stale", DailyBalance: &d, DailyCycleDate: "2020-01-01", Permanent: &perm}
+	none := &Account{Name: "none", DailyBalance: &d, Permanent: &perm} // 从没刷到过周期日
+	fresh := &Account{Name: "fresh", DailyBalance: &d, DailyCycleDate: todayKey(), Permanent: &perm}
+
+	if pickTier(stale) != 1 {
+		t.Error("跨日的旧快照：赠送余额今天不算数，应退到「只剩永久」档")
+	}
+	if pickTier(none) != 1 {
+		t.Error("周期日未知时不能当成今天还有赠送")
+	}
+	if pickTier(fresh) != 0 {
+		t.Error("今天刷到过、余额为正 → 第 0 档")
+	}
+	got := preferDailyTier([]*Account{stale, none, fresh})
+	if len(got) != 1 || got[0].Name != "fresh" {
+		t.Fatalf("只应留下今天确实有赠送的号，实际 %v", names(got))
+	}
+}
+
+// TestChargeDrainsDailyLocally 本地记账：一笔扣费既要在本地扣掉赠送余额，也要在
+// 超出剩余赠送时把差额记到永久积分上 —— 这样两次额度刷新（30 分钟）之间就能发现
+// 「这个号今天赠送用尽了」，立刻换号，而不是继续烧永久。
+func TestChargeDrainsDailyLocally(t *testing.T) {
+	dailyA, dailyB := int64(100), int64(5000)
+	a := &Account{Name: "a", Enabled: true, Session: "s", DailyBalance: &dailyA, DailyCycleDate: todayKey()}
+	b := &Account{Name: "b", Enabled: true, Session: "s", DailyBalance: &dailyB, DailyCycleDate: todayKey()}
+	if pickTier(a) != 0 || pickTier(b) != 0 {
+		t.Fatal("两个号今天都有赠送额度")
+	}
+
+	a.Charge(60)
+	if got := a.DailyConsumed(); got != 60 {
+		t.Errorf("当日消耗应记 60，实际 %d", got)
+	}
+	if *a.DailyBalance != 40 {
+		t.Errorf("赠送余额应被本地扣到 40，实际 %d", *a.DailyBalance)
+	}
+	if a.PermBurnedToday() != 0 {
+		t.Errorf("还没超支，不该记永久消耗，实际 %d", a.PermBurnedToday())
+	}
+
+	a.Charge(80) // 剩 40，超出 40 → 上游会改扣永久
+	if *a.DailyBalance != 0 {
+		t.Errorf("赠送余额应归零，实际 %d", *a.DailyBalance)
+	}
+	if got := a.PermBurnedToday(); got != 40 {
+		t.Errorf("超出的 40 分应记在永久积分上，实际 %d", got)
+	}
+	if pickTier(a) != 2 {
+		t.Errorf("赠送用尽且无永久余额 → 垫底档，实际 %d", pickTier(a))
+	}
+
+	// 端到端：赠送用尽的号立刻让位给还有赠送的号。
+	p := New("")
+	p.SetOptions(Options{Strategy: "round_robin", PreferDaily: true, StickyTTL: 0})
+	p.Add(a)
+	p.Add(b)
+	for i := 0; i < 5; i++ {
+		acc, err := p.Acquire(nil, "m", "")
+		if err != nil {
+			t.Fatalf("第 %d 次选号失败: %v", i, err)
+		}
+		p.Release(acc)
+		if acc.Name != "b" {
+			t.Fatalf("第 %d 次选到了 %s：赠送用尽的号不该再被选中", i, acc.Name)
+		}
+	}
+}
+
+// TestStickyYieldsToDailyTier 粘性绑定号当天赠送已用尽、池里还有别的号有赠送时，
+// 不能继续粘着它烧永久积分：该让位给有赠送的号，并把绑定改写到新号上。
+func TestStickyYieldsToDailyTier(t *testing.T) {
+	p := New("")
+	p.SetOptions(Options{Strategy: "round_robin", PreferDaily: true, StickyTTL: 1800, StickyMaxEntries: 10})
+	z, big := int64(0), int64(5000)
+	perm := int64(100000)
+	drained := &Account{Name: "drained", Enabled: true, Session: "s1", DailyBalance: &z,
+		DailyCycleDate: todayKey(), Permanent: &perm, Available: &perm}
+	fresh := &Account{Name: "fresh", Enabled: true, Session: "s2", DailyBalance: &big,
+		DailyCycleDate: todayKey(), Permanent: &perm, Available: &perm}
+	p.Add(drained)
+	p.Add(fresh)
+
+	// 上一轮把这条会话粘在了「赠送已用尽」的号上
+	p.Sticky().Bind("c-1", "drained")
+	acc, err := p.Acquire(nil, "m", "c-1")
+	if err != nil {
+		t.Fatalf("选号失败: %v", err)
+	}
+	if acc.Name != "fresh" {
+		t.Fatalf("应让位给今天还有赠送的号，实际选到 %s", acc.Name)
+	}
+	p.ReportSuccess(acc, "c-1", "m", 0)
+	if got := p.Sticky().Get("c-1"); got != "fresh" {
+		t.Errorf("绑定应改写到新号，实际 %q", got)
+	}
+	p.Release(acc)
+
+	// 池里没有别的有赠送的号时，粘性照旧生效（不能因为分层而无号可用）
+	p.Remove("fresh")
+	acc2, err := p.Acquire(nil, "m", "c-1")
+	if err != nil || acc2.Name != "drained" {
+		t.Fatalf("无替代号时应继续用绑定号: acc=%v err=%v", acc2, err)
+	}
+	p.Release(acc2)
+}
+
+// TestDailyCountersResetAcrossDay 本地当日计数跨日归零（否则「今天消耗了多少」
+// 会随着进程寿命一直累加，面板上的数就是假的）。
+func TestDailyCountersResetAcrossDay(t *testing.T) {
+	d := int64(10)
+	a := &Account{Name: "a", DailyBalance: &d, DailyCycleDate: todayKey()}
+	a.Charge(5)
+	if a.DailyConsumed() != 5 {
+		t.Fatalf("当日消耗应为 5，实际 %d", a.DailyConsumed())
+	}
+
+	a.rt.mu.Lock() // 伪造成昨天记的账
+	a.rt.dayKey = "2020-01-01"
+	a.rt.permBurned = 77
+	a.rt.mu.Unlock()
+	if a.DailyConsumed() != 0 || a.PermBurnedToday() != 0 {
+		t.Error("跨日后两个当日计数都应读成 0")
+	}
+	a.Charge(3)
+	if a.DailyConsumed() != 3 || a.PermBurnedToday() != 0 {
+		t.Errorf("跨日后第一笔应重新起算：消耗 %d / 永久 %d", a.DailyConsumed(), a.PermBurnedToday())
+	}
+}
+
 // TestLastErrorClearedOnSuccess 面板「状态」下的错误描述是当前状态：下一次
 // 成功调用必须把它清掉，否则一条早已恢复的错误会一直挂在面板上。
 func TestLastErrorClearedOnSuccess(t *testing.T) {
@@ -837,5 +972,42 @@ func TestRemarkSurvivesRestart(t *testing.T) {
 	}
 	if strings.Contains(string(raw), `"remark"`) {
 		t.Errorf("清除后不应留下空 remark 键: %s", raw)
+	}
+}
+
+// TestDailyAccountingSurvivesRestart 当日记账落盘并在重启后回读（否则面板上的
+// 「今日赠送剩余 / 今日永久消耗」每次重启都从零起算，「今日」名不副实）。
+func TestDailyAccountingSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	state := filepath.Join(dir, "state.json")
+	daily := int64(5000)
+	a := &Account{Name: "a", Enabled: true, Session: "s",
+		DailyBalance: &daily, DailyCycleDate: todayKey()}
+	a.Charge(30)
+
+	p := New(state)
+	p.Add(a)
+	p.Flush()
+
+	// 重启：新池从同一个 state.json 恢复
+	p2 := New(state)
+	p2.Add(&Account{Name: "a", Enabled: true, Session: "s",
+		DailyBalance: &daily, DailyCycleDate: todayKey()})
+	p2.ApplyState()
+	back := p2.Get("a")
+	if back.DailyConsumed() != 30 {
+		t.Errorf("重启后当日消耗应恢复为 30，实际 %d", back.DailyConsumed())
+	}
+
+	// 跨日的旧账不该被当成今天
+	a2 := &Account{Name: "b", Enabled: true, Session: "s"}
+	p3 := New(state)
+	p3.Add(a2)
+	p3.pendingState = map[string]map[string]any{
+		"b": {"dayKey": "2020-01-01", "dailyConsumed": float64(999), "permBurned": float64(888)},
+	}
+	p3.ApplyState()
+	if a2.DailyConsumed() != 0 || a2.PermBurnedToday() != 0 {
+		t.Errorf("昨天的账不该读成今天：%d / %d", a2.DailyConsumed(), a2.PermBurnedToday())
 	}
 }

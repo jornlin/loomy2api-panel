@@ -738,6 +738,11 @@ th.sorted[data-dir="desc"]::after { content: " ▼"; font-size: 10px; }
         <div class="stat warn"><div class="v" id="sPaused">-</div><div class="k">已暂停选号</div></div>
         <div class="stat bad"><div class="v" id="sDisabled">-</div><div class="k">已禁用</div></div>
         <div class="stat"><div class="v" id="sCredits">-</div><div class="k">积分剩余</div></div>
+        <!-- 每日赠送按自然日清零：左边是「今天还会作废多少」，右边是「今天有多少分
+             是从永久积分扣的」——后者只要不是 0，就说明选号把流量送到了当天赠送
+             已用尽的号上（上游不报错，静默改扣永久积分）。 -->
+        <div class="stat"><div class="v" id="sDailyLeft" title="今天还剩多少每日赠送额度（自然日清零，用不完就作废）">-</div><div class="k">今日赠送剩余</div></div>
+        <div class="stat"><div class="v" id="sPermBurned" title="今天有多少分是从永久积分里扣的。应恒为 0：不为 0 说明有请求落在「当天赠送已用尽」的号上">-</div><div class="k">今日永久消耗</div></div>
         <div class="stat"><div class="v" id="sSticky">-</div><div class="k">粘性会话</div></div>
       </div>
       <!-- 「积分到期提醒」原为独立表格（133 行、与账号池同一批数据），已并入账号池：

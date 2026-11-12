@@ -838,6 +838,21 @@ async function loadOverview(quiet) {
     $('sPaused').textContent = d.paused == null ? '-' : d.paused;
     const availSum = (d.accounts || []).reduce((a, s) => a + (Number(s.available) || 0), 0);
     $('sCredits').textContent = fmtPoints(availSum);
+    // 每日赠送口径（选号策略的验收指标）：剩余多少今天会作废、以及今天有多少分
+    // 是从永久积分扣的。后者应恒为 0。
+    const dailyLeft = Number(d.daily_left || 0);
+    const usable = d.daily_usable_accounts == null ? '-' : d.daily_usable_accounts;
+    const dl = $('sDailyLeft');
+    dl.textContent = fmtPoints(dailyLeft);
+    dl.parentElement.title = '今天还剩 ' + fmtPoints(dailyLeft) + ' 每日赠送额度（'
+      + usable + '/' + d.total + ' 个号还有赠送；自然日清零，用不完就作废）';
+    const burned = Number(d.perm_burned_today || 0);
+    const pb = $('sPermBurned');
+    pb.textContent = fmtPoints(burned);
+    pb.parentElement.className = 'stat ' + (burned > 0 ? 'bad' : 'good');
+    pb.parentElement.title = burned > 0
+      ? '今天有 ' + fmtPoints(burned) + ' 分从永久积分扣除：说明有请求落在「当天赠送已用尽」的号上'
+      : '今天所有消耗都走了每日赠送额度，永久积分没被动过';
     $('sSticky').textContent = d.sticky_sessions == null ? '-' : d.sticky_sessions;
     $('navSub').textContent = 'v' + d.version;
     $('navVer').textContent = 'v' + d.version;

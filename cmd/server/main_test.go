@@ -98,3 +98,20 @@ func TestProbeSuspectSessionNetworkFailureNoVerdict(t *testing.T) {
 		t.Error("应保持存疑，等窗口到期自动回池")
 	}
 }
+
+// TestUntilNextDay 跨日刷新定时器：必须落在下一个自然日零点之后、且不超过 24 小时
+// （每日赠送按自然日清零，新一天的额度要一次 first-login 才到账；固定 30 分钟的
+// ticker 会把这一轮拖到 00:29，那之前每个请求都在烧永久积分）。
+func TestUntilNextDay(t *testing.T) {
+	d := untilNextDay(20 * time.Second)
+	if d <= 0 || d > 24*time.Hour+21*time.Second {
+		t.Fatalf("距下次自然日应落在 (0, 24h20s]，实际 %v", d)
+	}
+	fire := time.Now().Add(d)
+	if fire.Hour() != 0 || fire.Minute() != 0 {
+		t.Errorf("触发点应落在 00:00 之后不久，实际 %s", fire.Format("2006-01-02 15:04:05"))
+	}
+	if fire.Before(time.Now()) {
+		t.Error("触发点必须在未来")
+	}
+}

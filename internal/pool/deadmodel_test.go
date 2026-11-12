@@ -117,10 +117,12 @@ func TestPreferDailyTier(t *testing.T) {
 	daily, permOnly, unknown := int64(4000), int64(0), int64(0)
 	_ = daily
 	big := int64(900000)
+	today := todayKey()
 
-	a := &Account{Name: "daily", DailyBalance: &big, Permanent: &permOnly} // 档 0
-	b := &Account{Name: "perm", DailyBalance: &permOnly, Permanent: &big}  // 档 1
-	c := &Account{Name: "unknown"}                                         // 档 2
+	a := &Account{Name: "daily", DailyBalance: &big, Permanent: &permOnly,
+		DailyCycleDate: today}                                            // 档 0
+	b := &Account{Name: "perm", DailyBalance: &permOnly, Permanent: &big} // 档 1
+	c := &Account{Name: "unknown"}                                        // 档 2
 	got := preferDailyTier([]*Account{a, b, c})
 	if len(got) != 1 || got[0].Name != "daily" {
 		t.Fatalf("应只留档 0 的账号，实际 %v", names(got))
@@ -154,7 +156,7 @@ func TestAcquirePrefersDailyQuota(t *testing.T) {
 	p.Add(&Account{Name: "perm-only", Enabled: true, Session: "s1", ExpireAt: expire,
 		DailyBalance: &zero, Permanent: &perm, Available: &perm})
 	p.Add(&Account{Name: "has-daily", Enabled: true, Session: "s2", ExpireAt: expire,
-		DailyBalance: &daily, Permanent: &perm, Available: &perm})
+		DailyBalance: &daily, Permanent: &perm, Available: &perm, DailyCycleDate: todayKey()})
 
 	for i := 0; i < 40; i++ {
 		acc, err := p.Acquire(nil, "spark-x", "")
@@ -176,7 +178,7 @@ func TestPreferDailyCanBeDisabled(t *testing.T) {
 	p.Add(&Account{Name: "perm-only", Enabled: true, Session: "s1", ExpireAt: expire,
 		DailyBalance: &zero, Permanent: &perm, Available: &perm})
 	p.Add(&Account{Name: "has-daily", Enabled: true, Session: "s2", ExpireAt: expire,
-		DailyBalance: &daily, Permanent: &perm, Available: &perm})
+		DailyBalance: &daily, Permanent: &perm, Available: &perm, DailyCycleDate: todayKey()})
 
 	seen := map[string]int{}
 	for i := 0; i < 200; i++ {

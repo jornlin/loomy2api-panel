@@ -104,6 +104,12 @@ type runtime struct {
 
 	lastError     string
 	dailyConsumed int64
+	// dayKey 本地当日计数所属的自然日（YYYY-MM-DD）；跨日时下面两个计数清零。
+	dayKey string
+	// permBurned 当日有多少分是从**永久积分**里扣的（本地记账口径，见 Charge）。
+	// 每日赠送按自然日清零，所以这个数越接近 0 越好：它不是 0 就说明选号把流量
+	// 送到了「今天赠送已用尽」的号上。
+	permBurned int64
 
 	// suspectUntil 登录态存疑截止墙钟：上游回过 401、但复核还没结论。
 	// 存疑期间不参与选号（Healthy 为假），窗口自然到期也会自动回池 ——
@@ -141,6 +147,8 @@ func (r *runtime) absorb(src *runtime) {
 	r.inflight = src.inflight
 	r.lastError = src.lastError
 	r.dailyConsumed = src.dailyConsumed
+	r.dayKey = src.dayKey
+	r.permBurned = src.permBurned
 	r.suspectUntil = src.suspectUntil
 	r.suspectHits = src.suspectHits
 }
@@ -533,19 +541,80 @@ func (a *Account) SetLastError(msg string) {
 	a.rt.lastError = msg
 }
 
-// AddPointsUsed 累加已耗积分。
-func (a *Account) AddPointsUsed(n int64) {
+// Charge 记一次实际扣费（成功请求的 points）。
+//
+// 除了累计，还按上游口径把本地缓存的「当日赠送余额」扣掉：上游是**先扣当日赠送、
+// 再扣永久积分**（FEFO，同一个号内部不用我们操心），本地照同一口径记账，才能在
+// 两次额度刷新（默认 30 分钟）之间就知道某个号的当天赠送已经用尽 —— 及时换成
+// 还有赠送的号，而不是继续用它静默烧永久积分（上游不会因为赠送耗尽报错）。
+// 下一次额度刷新会用上游真值覆盖本地估计，误差不会累积。
+func (a *Account) Charge(n int64) {
+	if n <= 0 {
+		return
+	}
 	a.rt.mu.Lock()
-	a.PointsUsed += n
+	defer a.rt.mu.Unlock()
+	if now := todayKey(); a.rt.dayKey != now {
+		// 跨日：每日赠送按自然日清零，本地当日计数也跟着归零。
+		a.rt.dayKey = now
+		a.rt.dailyConsumed = 0
+		a.rt.permBurned = 0
+	}
 	a.rt.dailyConsumed += n
-	a.rt.mu.Unlock()
+	a.PointsUsed += n
+	if a.DailyBalance == nil {
+		return // 余额未知：不猜（档位判定本来就会把它排到后面）
+	}
+	bal := *a.DailyBalance
+	if bal >= n {
+		*a.DailyBalance = bal - n
+		if a.DailyUsed != nil {
+			*a.DailyUsed += n
+		}
+		return
+	}
+	// 赠送额度不够这次扣费：差额上游改扣永久积分（不报错、照常 200）。
+	a.rt.permBurned += n - bal
+	if a.DailyUsed != nil {
+		*a.DailyUsed += bal
+	}
+	*a.DailyBalance = 0
 }
 
-// DailyConsumed 当日本地累计消耗。
+// DailyConsumed 当日累计消耗（本地口径，跨日自动归零）。
 func (a *Account) DailyConsumed() int64 {
 	a.rt.mu.Lock()
 	defer a.rt.mu.Unlock()
+	if a.rt.dayKey != todayKey() {
+		return 0
+	}
 	return a.rt.dailyConsumed
+}
+
+// PermBurnedToday 当日从永久积分里扣掉的分数（本地口径）。
+func (a *Account) PermBurnedToday() int64 {
+	a.rt.mu.Lock()
+	defer a.rt.mu.Unlock()
+	if a.rt.dayKey != todayKey() {
+		return 0
+	}
+	return a.rt.permBurned
+}
+
+// todayKey 本地自然日键（与 CheckinDone 同口径）。
+func todayKey() string { return time.Now().Format("2006-01-02") }
+
+// DailyUsableToday 今天这份「每日赠送额度」是否还有余额可用。
+//
+// 两个条件缺一不可：余额 > 0 **且**快照周期日就是今天。只看余额会被跨日的旧快照
+// 骗到：每日赠送按自然日清零，昨天的余额今天一分不算，而新一天的额度要一次
+// first-login（后台刷额度顺带完成）才到账 —— 在那之前用这个号，消耗全部记在
+// 永久积分上，且上游不报错（静默改扣、照常 200）。
+func (a *Account) DailyUsableToday() bool {
+	if a.DailyBalance == nil || *a.DailyBalance <= 0 {
+		return false
+	}
+	return a.DailyCycleDate == todayKey()
 }
 
 // CheckinDone 今日是否已完成签到（额度快照的周期日 == 今天）。
@@ -556,7 +625,7 @@ func (a *Account) CheckinDone() bool {
 	if a.DailyCycleDate == "" {
 		return false
 	}
-	return a.DailyCycleDate == time.Now().Format("2006-01-02")
+	return a.DailyCycleDate == todayKey()
 }
 
 // Public 面板/接口视图（无秘密）。
@@ -570,6 +639,9 @@ func (a *Account) Public() map[string]any {
 	inflight := a.rt.inflight
 	lastErr := a.rt.lastError
 	dailyConsumed := a.rt.dailyConsumed
+	if a.rt.dayKey != todayKey() {
+		dailyConsumed = 0
+	}
 	modelCool := map[string]any{}
 	for k, v := range a.rt.modelCool {
 		if v.Until > n {
@@ -582,6 +654,10 @@ func (a *Account) Public() map[string]any {
 	breakerFails := a.rt.breakerFails
 	suspectLeft := a.rt.suspectUntil - n
 	suspectHits := a.rt.suspectHits
+	permBurned := int64(0)
+	if a.rt.dayKey == todayKey() {
+		permBurned = a.rt.permBurned
+	}
 	a.rt.mu.Unlock()
 
 	sess := ""
@@ -629,6 +705,8 @@ func (a *Account) Public() map[string]any {
 		"requests":              a.Requests,
 		"points_used":           a.PointsUsed,
 		"daily_consumed":        dailyConsumed,
+		"daily_usable":          a.DailyUsableToday(),
+		"perm_burned_today":     permBurned,
 		"failures":              a.Failures,
 		"in_cooldown":           coolLeft > 0 || breakerLeft > 0,
 		"cooldown_seconds_left": maxF(round1(coolLeft), 0),

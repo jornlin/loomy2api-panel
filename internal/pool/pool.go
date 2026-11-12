@@ -268,10 +268,28 @@ func (p *Pool) SyncToDir(accounts []*Account) {
 // ErrNoAccount 无可用账号。
 var ErrNoAccount = fmt.Errorf("没有可用账号（全部冷却 / 熔断 / 额度耗尽 / 在途占满）")
 
+// hasBetterDailyTier 池里是否存在「今天还有赠送额度」的号（粘性让位的判据）。
+func (p *Pool) hasBetterDailyTier(self *Account, model string, skip map[string]bool) bool {
+	for _, a := range p.All() {
+		if a == self || skip[a.Name] || !a.HealthyForModel(model) || p.floorBlocked(a, model) {
+			continue
+		}
+		if pickTier(a) == 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Acquire 选一个可用账号并占一个在途名额。exclude 为本次已失败过的账号名。
 //
 // 会话粘性优先：sessionKey 命中且绑定账号健康则直接用它（不参与抽签）；
 // 未命中 / 绑定号不可用时走正常选号，并在调用方 reportSuccess 时写回绑定。
+//
+// ⚠️ 粘性不能压过「优先花每日赠送额度」：绑定号当天赠送已用尽、而池里还有别的号
+// 今天有赠送时，继续粘在它身上会把每一轮对话都记到永久积分上（实测踩过：一个只剩
+// 5 分赠送的号被粘住后连烧 4 笔）。这种情况按「绑定号不可用」处理，走正常选号，
+// 成功后再把绑定改写到新账号（ReportSuccess 里本来就会重绑）。
 func (p *Pool) Acquire(exclude []string, model string, sessionKey string) (*Account, error) {
 	opts := p.Options()
 
@@ -284,10 +302,12 @@ func (p *Pool) Acquire(exclude []string, model string, sessionKey string) (*Acco
 	if sessionKey != "" {
 		if name := p.Sticky().Get(sessionKey); name != "" && !skip[name] {
 			if a := p.Get(name); a != nil && a.HealthyForModel(model) && !p.floorBlocked(a, model) {
-				if a.AcquireInflight(opts.MaxInFlight) {
-					a.Touch()
-					p.bumpSeq(a)
-					return a, nil
+				if !opts.PreferDaily || pickTier(a) == 0 || !p.hasBetterDailyTier(a, model, skip) {
+					if a.AcquireInflight(opts.MaxInFlight) {
+						a.Touch()
+						p.bumpSeq(a)
+						return a, nil
+					}
 				}
 			}
 		}
@@ -438,7 +458,7 @@ func (p *Pool) ReportSuccess(a *Account, sessionKey, model string, points int64)
 	a.NoteSuccess()
 	a.Requests++
 	if points > 0 {
-		a.AddPointsUsed(points)
+		a.Charge(points)
 	}
 	if sessionKey != "" {
 		p.Sticky().Bind(sessionKey, a.Name)
@@ -549,6 +569,8 @@ func (p *Pool) Overview() map[string]any {
 	var healthy, cooling, disabled, paused, inflight int
 	var totalAvailable int64
 	var availableKnown bool
+	var dailyLeft, permBurned, dailyConsumed int64
+	var dailyUsable int
 	var requests, points, failures int64
 	for _, a := range all {
 		if !a.Enabled {
@@ -568,6 +590,14 @@ func (p *Pool) Overview() map[string]any {
 			totalAvailable += *v
 			availableKnown = true
 		}
+		// 每日赠送口径：还剩多少（会作废）、今天用了多少、以及**有多少是从永久积分扣的**。
+		// 最后一个是选号策略的验收指标：只要它还是 0，就说明没浪费永久额度。
+		if a.DailyUsableToday() {
+			dailyUsable++
+			dailyLeft += *a.DailyBalance
+		}
+		permBurned += a.PermBurnedToday()
+		dailyConsumed += a.DailyConsumed()
 	}
 	out := map[string]any{
 		"total":       len(all),
@@ -579,6 +609,11 @@ func (p *Pool) Overview() map[string]any {
 		"requests":    requests,
 		"points_used": points,
 		"failures":    failures,
+		// 今日赠送额度：usable = 还有余额的号数，left = 池内还剩多少（自然日清零）
+		"daily_usable_accounts": dailyUsable,
+		"daily_left":            dailyLeft,
+		"daily_consumed_today":  dailyConsumed,
+		"perm_burned_today":     permBurned,
 	}
 	if availableKnown {
 		out["available_points"] = totalAvailable
@@ -608,6 +643,11 @@ func (p *Pool) stateSnapshot() map[string]any {
 			"dailyUsed":    a.DailyUsed,
 			"dailyCycle":   a.DailyCycleDate,
 			"quotaAt":      a.QuotaAt,
+			// 当日记账也落盘：否则重启后「今日赠送剩余 / 今日永久消耗」从零起算，
+			// 面板上的「今日」名不副实。跨日由 dayKey 判定，旧数据不会被当今天。
+			"dayKey":       a.rt.dayKey,
+			"dailyConsumed": a.rt.dailyConsumed,
+			"permBurned":   a.rt.permBurned,
 		}
 	}
 	return map[string]any{
@@ -675,6 +715,13 @@ func (p *Pool) ApplyState() {
 			continue
 		}
 		a.Requests = int64Of(st["requests"])
+		if k, _ := st["dayKey"].(string); k == todayKey() {
+			a.rt.mu.Lock()
+			a.rt.dayKey = k
+			a.rt.dailyConsumed = int64Of(st["dailyConsumed"])
+			a.rt.permBurned = int64Of(st["permBurned"])
+			a.rt.mu.Unlock()
+		}
 		a.PointsUsed = int64Of(st["pointsUsed"])
 		a.Failures = int64Of(st["failures"])
 		if v, ok := st["enabled"]; ok {

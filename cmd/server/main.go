@@ -61,8 +61,7 @@ func main() {
 	// 判死（清空登录态）必须立刻落盘：否则重启后会把一份已死的凭证又读回来，
 	// 再去上游撞一次 401。池只认凭证内容，不知道目录在哪，所以由这里注入。
 	p.SetAccountSaver(func(a *pool.Account) error { return pool.SaveAccount(authDir, a) })
-	if accounts, lerr := pool.LoadAccounts(authDir); lerr == nil && len(accounts) > 0 {
-		p.SyncToDir(accounts)
+	if accounts, lerr := pool.LoadAccounts(authDir); lerr == nil && len(accounts) > 0 {		p.SyncToDir(accounts)
 		p.ApplyState()
 		log.Printf("从 %s 加载 %d 个账号", authDir, len(accounts))
 	} else if lerr != nil {
@@ -158,6 +157,14 @@ func background(cfg *config.Config, p *pool.Pool, up *upstream.Client, pl *panel
 	// noted 记录每个账号最近一次役龄播报的凭证签发时间，避免同一份 session 反复刷屏。
 	noted := map[string]int64{}
 
+	// 每日赠送按自然日清零，新一天的额度要一次 first-login（刷额度顺带做）才到账。
+	// 固定 30 分钟的 ticker 会把这一轮排到 00:00–00:29 之间的任意时刻，那之前池子里
+	// 每个号都「今天还没有赠送」，请求只能记在永久积分上（上游不报错、照常 200）。
+	// 所以在跨日那一刻补一轮全量刷新：166 个号并发 4 大约 40 秒刷完，空窗从最长
+	// 30 分钟压到几十秒。
+	daily := time.NewTimer(untilNextDay(20 * time.Second))
+	defer daily.Stop()
+
 	for {
 		select {
 		case <-stop:
@@ -171,8 +178,19 @@ func background(cfg *config.Config, p *pool.Pool, up *upstream.Client, pl *panel
 			probeSuspectSessions(p, up)
 		case <-quota.C:
 			refreshQuotas(p, up)
+		case <-daily.C:
+			log.Printf("跨日：刷新全池额度（顺带 first-login 领新一天的每日赠送）")
+			refreshQuotas(p, up)
+			daily.Reset(untilNextDay(20 * time.Second))
 		}
 	}
+}
+
+// untilNextDay 距下一个自然日零点的时长（再加 after 的延迟，避开边界抖动）。
+func untilNextDay(after time.Duration) time.Duration {
+	now := time.Now()
+	next := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).AddDate(0, 0, 1)
+	return next.Sub(now) + after
 }
 
 // noteSessionAge 登录态役龄播报。
