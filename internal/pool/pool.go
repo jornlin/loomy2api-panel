@@ -33,8 +33,10 @@ type Options struct {
 	SessionProbeSeconds float64
 	// SessionDropHits 连续 401 达到几次直接判死（复核一直没结论时的兜底）。
 	SessionDropHits int
-	// PreferDaily 选号时把「今日赠送额度 > 0」的账号放前面（见 pickTier）。
+	// PreferDaily 选号时把「今日赠送额度还够用」的账号放前面（见 pickTier）。
 	PreferDaily bool
+	// DailyTailPoints 每日赠送余额低于此值即视为「已用尽」（选号跳过，见 pickTier）。
+	DailyTailPoints int64
 	// DeadModelTTL 404 模型失效记录的存活时长（0 = 用 DefaultDeadModelTTL）。
 	DeadModelTTL time.Duration
 }
@@ -57,6 +59,7 @@ func DefaultOptions() Options {
 
 		SessionProbeSeconds: 120,
 		SessionDropHits:     3,
+		DailyTailPoints:     100,
 	}
 }
 
@@ -268,13 +271,19 @@ func (p *Pool) SyncToDir(accounts []*Account) {
 // ErrNoAccount 无可用账号。
 var ErrNoAccount = fmt.Errorf("没有可用账号（全部冷却 / 熔断 / 额度耗尽 / 在途占满）")
 
-// hasBetterDailyTier 池里是否存在「今天还有赠送额度」的号（粘性让位的判据）。
+// tierOf 账号在当前池参数下的积分档位。
+func (p *Pool) tierOf(a *Account) int {
+	return pickTier(a, p.Options().DailyTailPoints)
+}
+
+// hasBetterDailyTier 池里是否存在「今天赠送额度还够用」的号（粘性让位的判据）。
 func (p *Pool) hasBetterDailyTier(self *Account, model string, skip map[string]bool) bool {
+	tail := p.Options().DailyTailPoints
 	for _, a := range p.All() {
 		if a == self || skip[a.Name] || !a.HealthyForModel(model) || p.floorBlocked(a, model) {
 			continue
 		}
-		if pickTier(a) == 0 {
+		if pickTier(a, tail) == 0 {
 			return true
 		}
 	}
@@ -302,7 +311,7 @@ func (p *Pool) Acquire(exclude []string, model string, sessionKey string) (*Acco
 	if sessionKey != "" {
 		if name := p.Sticky().Get(sessionKey); name != "" && !skip[name] {
 			if a := p.Get(name); a != nil && a.HealthyForModel(model) && !p.floorBlocked(a, model) {
-				if !opts.PreferDaily || pickTier(a) == 0 || !p.hasBetterDailyTier(a, model, skip) {
+				if !opts.PreferDaily || pickTier(a, opts.DailyTailPoints) == 0 || !p.hasBetterDailyTier(a, model, skip) {
 					if a.AcquireInflight(opts.MaxInFlight) {
 						a.Touch()
 						p.bumpSeq(a)
@@ -359,7 +368,7 @@ func (p *Pool) Acquire(exclude []string, model string, sessionKey string) (*Acco
 	// 永久积分不过期。平均加权会先烧永久积分、把每天会作废的赠送额度留到浪费。
 	// 上游不会因为赠送额度耗尽报错（继续扣永久、照常 200），所以只能靠选号侧排序。
 	if opts.PreferDaily {
-		candidates = preferDailyTier(candidates)
+		candidates = preferDailyTier(candidates, opts.DailyTailPoints)
 	}
 
 	// 在途未满的优先
@@ -592,9 +601,12 @@ func (p *Pool) Overview() map[string]any {
 		}
 		// 每日赠送口径：还剩多少（会作废）、今天用了多少、以及**有多少是从永久积分扣的**。
 		// 最后一个是选号策略的验收指标：只要它还是 0，就说明没浪费永久额度。
+		// usable 用选号口径（含尾巴阈值）统计，与「为什么还烧永久」对得上。
 		if a.DailyUsableToday() {
-			dailyUsable++
 			dailyLeft += *a.DailyBalance
+		}
+		if tail := p.Options().DailyTailPoints; pickTier(a, tail) == 0 {
+			dailyUsable++
 		}
 		permBurned += a.PermBurnedToday()
 		dailyConsumed += a.DailyConsumed()

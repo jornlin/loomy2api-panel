@@ -58,8 +58,14 @@ func successWeight(a *Account) float64 {
 	return float64(a.Requests) / float64(total) * WSuccess
 }
 
-// pickTier 账号的积分档位（越小越优先）。0 = **今天**的赠送额度还有余额；
+// pickTier 账号的积分档位（越小越优先）。0 = **今天**的赠送额度还够用；
 // 1 = 只剩永久积分；2 = 其余（余额未知 / 查询失败 / 两头都空）。
+//
+// 第 0 档还要求余额大于 tail（尾巴阈值）：单笔请求要花多少分，只有发出去才知道
+// （今日实测 4.2 万笔：中位 10、p99 38、最大 402），余量只剩几十的号一旦被选中，
+// 超出部分必然记到永久积分上。留一条尾巴不碰、换到余量充足的号，代价是这点余额
+// 当天作废 —— 而池内赠送额度本来就大量用不完（日供给 83 万 vs 需求 23 万）。
+// tail = 0 表示关掉这层保护（余量 > 0 就算第 0 档）。
 //
 // 第 0 档的判据是 DailyUsableToday（余额 > 0 且周期日 = 今天），不是「余额 > 0」：
 // 跨日后旧快照仍写着余额，按后者会把流量主动送到「今天还没领到赠送」的号上，
@@ -68,8 +74,8 @@ func successWeight(a *Account) float64 {
 // ⚠️ 余额未知**必须垫底**而不是排最前：宁可先用能确认余额的号，也不要把流量
 // 押在一个连额度都没查到的号上（dsh-providers-hub 的同类选择器把「查询失败」
 // 显式归最后一档，理由一致）。
-func pickTier(a *Account) int {
-	if a.DailyUsableToday() {
+func pickTier(a *Account, tail int64) int {
+	if a.DailyUsableToday() && *a.DailyBalance > tail {
 		return 0
 	}
 	perm := a.Permanent
@@ -97,13 +103,13 @@ func pickTier(a *Account) int {
 // Σd_i 与总消耗都由供需决定，所以**最小化浪费等价于最小化永久消耗**，而后者只要
 // 「还有赠送余量的号没用完之前，绝不碰赠送已尽的号」就取到最优 —— 与余量在号之间
 // 怎么分配无关。档内按余额排序不但没有收益，还会打破余额/闲置/成功率的负载均衡。
-func preferDailyTier(cands []*Account) []*Account {
+func preferDailyTier(cands []*Account, tail int64) []*Account {
 	if len(cands) <= 1 {
 		return cands
 	}
 	best := 2
 	for _, a := range cands {
-		if t := pickTier(a); t < best {
+		if t := pickTier(a, tail); t < best {
 			best = t
 		}
 	}
@@ -112,7 +118,7 @@ func preferDailyTier(cands []*Account) []*Account {
 	}
 	out := make([]*Account, 0, len(cands))
 	for _, a := range cands {
-		if pickTier(a) == best {
+		if pickTier(a, tail) == best {
 			out = append(out, a)
 		}
 	}

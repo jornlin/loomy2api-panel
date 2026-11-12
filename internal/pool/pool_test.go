@@ -386,16 +386,16 @@ func TestDailyTierRejectsStaleSnapshot(t *testing.T) {
 	none := &Account{Name: "none", DailyBalance: &d, Permanent: &perm} // 从没刷到过周期日
 	fresh := &Account{Name: "fresh", DailyBalance: &d, DailyCycleDate: todayKey(), Permanent: &perm}
 
-	if pickTier(stale) != 1 {
+	if pickTier(stale, 0) != 1 {
 		t.Error("跨日的旧快照：赠送余额今天不算数，应退到「只剩永久」档")
 	}
-	if pickTier(none) != 1 {
+	if pickTier(none, 0) != 1 {
 		t.Error("周期日未知时不能当成今天还有赠送")
 	}
-	if pickTier(fresh) != 0 {
+	if pickTier(fresh, 0) != 0 {
 		t.Error("今天刷到过、余额为正 → 第 0 档")
 	}
-	got := preferDailyTier([]*Account{stale, none, fresh})
+	got := preferDailyTier([]*Account{stale, none, fresh}, 0)
 	if len(got) != 1 || got[0].Name != "fresh" {
 		t.Fatalf("只应留下今天确实有赠送的号，实际 %v", names(got))
 	}
@@ -408,7 +408,7 @@ func TestChargeDrainsDailyLocally(t *testing.T) {
 	dailyA, dailyB := int64(100), int64(5000)
 	a := &Account{Name: "a", Enabled: true, Session: "s", DailyBalance: &dailyA, DailyCycleDate: todayKey()}
 	b := &Account{Name: "b", Enabled: true, Session: "s", DailyBalance: &dailyB, DailyCycleDate: todayKey()}
-	if pickTier(a) != 0 || pickTier(b) != 0 {
+	if pickTier(a, 0) != 0 || pickTier(b, 0) != 0 {
 		t.Fatal("两个号今天都有赠送额度")
 	}
 
@@ -430,8 +430,8 @@ func TestChargeDrainsDailyLocally(t *testing.T) {
 	if got := a.PermBurnedToday(); got != 40 {
 		t.Errorf("超出的 40 分应记在永久积分上，实际 %d", got)
 	}
-	if pickTier(a) != 2 {
-		t.Errorf("赠送用尽且无永久余额 → 垫底档，实际 %d", pickTier(a))
+	if pickTier(a, 0) != 2 {
+		t.Errorf("赠送用尽且无永久余额 → 垫底档，实际 %d", pickTier(a, 0))
 	}
 
 	// 端到端：赠送用尽的号立刻让位给还有赠送的号。
@@ -487,6 +487,38 @@ func TestStickyYieldsToDailyTier(t *testing.T) {
 		t.Fatalf("无替代号时应继续用绑定号: acc=%v err=%v", acc2, err)
 	}
 	p.Release(acc2)
+}
+
+// TestDailyTailSkipsNearlyEmptyAccounts 赠送余额只剩一点点（低于尾巴阈值）的号
+// 不该再接单：单笔消耗只有发出去才知道（实测中位 10 分、p99 38、最大 402），
+// 选中它必然把超出部分记到永久积分上。
+func TestDailyTailSkipsNearlyEmptyAccounts(t *testing.T) {
+	tail := int64(100)
+	tiny, fat, perm := int64(30), int64(5000), int64(9000)
+	a := &Account{Name: "tiny", DailyBalance: &tiny, DailyCycleDate: todayKey(), Permanent: &perm}
+	b := &Account{Name: "fat", DailyBalance: &fat, DailyCycleDate: todayKey(), Permanent: &perm}
+
+	if pickTier(a, tail) != 1 {
+		t.Errorf("余量 30 < 尾巴 100：不该再当第 0 档，实际 %d", pickTier(a, tail))
+	}
+	if pickTier(a, 0) != 0 {
+		t.Error("关掉尾巴保护（tail=0）时，30 分仍算第 0 档")
+	}
+	got := preferDailyTier([]*Account{a, b}, tail)
+	if len(got) != 1 || got[0].Name != "fat" {
+		t.Fatalf("应只留余量充足的号，实际 %v", names(got))
+	}
+
+	// 池里只有尾巴号时仍要能用它（preferDailyTier 只剩一个候选就原样返回）
+	one := preferDailyTier([]*Account{a}, tail)
+	if len(one) != 1 || one[0].Name != "tiny" {
+		t.Fatalf("只有尾巴号时不该无号可用，实际 %v", names(one))
+	}
+	// 池里只有尾巴号 + 永久号：都退到永久档，仍能选出号（不中断服务）
+	two := preferDailyTier([]*Account{a, b}, tail)
+	if len(two) == 0 {
+		t.Fatal("不该出现空候选")
+	}
 }
 
 // TestDailyCountersResetAcrossDay 本地当日计数跨日归零（否则「今天消耗了多少」

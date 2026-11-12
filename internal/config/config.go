@@ -130,6 +130,11 @@ type Config struct {
 	// SessionDropHits 连续 401 达到几次直接判死（复核拿不到结论时的兜底）。
 	SessionDropHits int `json:"session_drop_hits"`
 	BalanceFloor        int    `json:"balance_floor"` // 可用积分低于此值停止接单（0=关闭）
+	// DailyTailPoints 每日赠送余额低于此值就当作「已用尽」，选号不再用它。
+	// 单笔请求的实际消耗只有发出去才知道（实测中位 10 分、p99 38、最大 402），
+	// 余量只剩几十的号一旦中选，超出部分必然记到永久积分上；留条尾巴不碰更划算
+	// （这点余额当天作废，而池内赠送额度本就大量用不完）。0 = 关闭这层保护。
+	DailyTailPoints int `json:"daily_tail_points"`
 	// PreferDaily 选号优先花「今日赠送额度」（按自然日清零），再动永久积分。
 	// 上游不会因赠送额度耗尽报错（静默改扣永久积分、照常 200），只能靠排序实现。
 	PreferDaily bool `json:"prefer_daily_quota"`
@@ -191,6 +196,7 @@ func Defaults() *Config {
 		SessionDropHits:     3,
 		BalanceFloor:        0,
 		PreferDaily:         true,
+		DailyTailPoints:     100,
 		StrictModelCheck:    true,
 		DeadModelTTLDays:    30,
 		UsageMaxEntries:     20000,

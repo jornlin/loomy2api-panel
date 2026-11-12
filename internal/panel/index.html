@@ -1053,6 +1053,9 @@ th.sorted[data-dir="desc"]::after { content: " ▼"; font-size: 10px; }
               <label class="fld"><span class="lb">登录态役龄播报阈值（天）</span>
                 <input name="session_renew_before_days" type="number" min="0">
                 <span class="hint">役龄到点在日志播报一次（默认 14 = 客户端申请值；本地到期日是估计值，不作判据）</span></label>
+              <label class="fld"><span class="lb">赠送余额尾巴阈值（分）</span>
+                <input name="daily_tail_points" type="number" min="0">
+                <span class="hint">每日赠送余额低于此值就当作已用尽、不再选它（单笔消耗不可预知，留条尾巴免得溢出到永久积分）；0 = 关闭</span></label>
               <label class="fld"><span class="lb">登录态复核窗口（秒）</span>
                 <input name="session_probe_seconds" type="number" min="1">
                 <span class="hint">上游回 401 后先出池这么久等复核；复核也 401 才判失效</span></label>

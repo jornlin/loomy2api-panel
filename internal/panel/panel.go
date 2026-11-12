@@ -842,6 +842,7 @@ func poolOptions(cfg *config.Config) pool.Options {
 
 		SessionProbeSeconds: float64(cfg.SessionProbeSeconds),
 		SessionDropHits:     cfg.SessionDropHits,
+		DailyTailPoints:     int64(cfg.DailyTailPoints),
 		PreferDaily:      cfg.PreferDaily,
 		DeadModelTTL:     time.Duration(cfg.DeadModelTTLDays) * 24 * time.Hour,
 	}

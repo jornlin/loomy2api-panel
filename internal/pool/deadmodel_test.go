@@ -123,19 +123,19 @@ func TestPreferDailyTier(t *testing.T) {
 		DailyCycleDate: today}                                            // 档 0
 	b := &Account{Name: "perm", DailyBalance: &permOnly, Permanent: &big} // 档 1
 	c := &Account{Name: "unknown"}                                        // 档 2
-	got := preferDailyTier([]*Account{a, b, c})
+	got := preferDailyTier([]*Account{a, b, c}, 0)
 	if len(got) != 1 || got[0].Name != "daily" {
 		t.Fatalf("应只留档 0 的账号，实际 %v", names(got))
 	}
 
 	// 没有档 0 → 取档 1
-	got = preferDailyTier([]*Account{b, c})
+	got = preferDailyTier([]*Account{b, c}, 0)
 	if len(got) != 1 || got[0].Name != "perm" {
 		t.Fatalf("应退到档 1，实际 %v", names(got))
 	}
 
 	// 全未知 → 不分层，保持原样（不能因为查不到余额就无号可用）
-	got = preferDailyTier([]*Account{c, {Name: "c2"}})
+	got = preferDailyTier([]*Account{c, {Name: "c2"}}, 0)
 	if len(got) != 2 {
 		t.Fatalf("全未知时应保持原候选集，实际 %v", names(got))
 	}

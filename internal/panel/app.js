@@ -1403,6 +1403,7 @@ const CFG_MAP = {
   quota_refresh_minutes: 'quota_refresh_minutes',
   session_renew_before_days: 'session_renew_before_days',
   session_probe_seconds: 'session_probe_seconds', session_drop_hits: 'session_drop_hits',
+  daily_tail_points: 'daily_tail_points',
   keepalive_min_tokens: 'keepalive_min_tokens',
   soft_rate_base_seconds: 'soft_rate_base_seconds', soft_rate_max_seconds: 'soft_rate_max_seconds',
   cooldown_seconds: 'cooldown_seconds', not_found_cooldown_seconds: 'not_found_cooldown_seconds',
@@ -1420,7 +1421,7 @@ const CFG_MAP = {
 };
 const NUM_FIELDS = ['pick_top_n', 'max_inflight_per_account', 'balance_floor', 'sticky_ttl_seconds',
   'sticky_max_entries', 'quota_refresh_minutes', 'session_renew_before_days',
-  'session_probe_seconds', 'session_drop_hits', 'keepalive_min_tokens',
+  'session_probe_seconds', 'session_drop_hits', 'daily_tail_points', 'keepalive_min_tokens',
   'soft_rate_base_seconds', 'soft_rate_max_seconds', 'cooldown_seconds', 'not_found_cooldown_seconds',
   'breaker_threshold', 'breaker_cooldown_seconds', 'breaker_cooldown_max_seconds',
   'timeout_seconds', 'max_retries', 'usage_max_entries'];
