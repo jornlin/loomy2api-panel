@@ -118,8 +118,17 @@ type Config struct {
 	MaxInFlight         int    `json:"max_inflight_per_account"`
 	StickyTTLSeconds    int    `json:"sticky_ttl_seconds"`
 	StickyMaxEntries    int    `json:"sticky_max_entries"`
-	SessionRenewDays    int    `json:"session_renew_before_days"`
+	// SessionNoteDays 登录态役龄播报阈值（天）：役龄到点就在日志里报一次。
+	//
+	// json 键沿用 `session_renew_before_days`（历史键名，面板表单与线上 config.json
+	// 都在用，改名会凭空多一次迁移）；语义已从「剩余 N 天告警」改为「已服役 N 天播报」——
+	// 本地 expireAt 是估计值，没有「剩余」可言，见 pool 包注释。
+	SessionNoteDays     int    `json:"session_renew_before_days"`
 	QuotaRefreshMinutes int    `json:"quota_refresh_minutes"`
+	// SessionProbeSeconds 登录态存疑窗口（秒）：上游回过 401 后先出池这么久等复核。
+	SessionProbeSeconds int `json:"session_probe_seconds"`
+	// SessionDropHits 连续 401 达到几次直接判死（复核拿不到结论时的兜底）。
+	SessionDropHits int `json:"session_drop_hits"`
 	BalanceFloor        int    `json:"balance_floor"` // 可用积分低于此值停止接单（0=关闭）
 	// PreferDaily 选号优先花「今日赠送额度」（按自然日清零），再动永久积分。
 	// 上游不会因赠送额度耗尽报错（静默改扣永久积分、照常 200），只能靠排序实现。
@@ -176,8 +185,10 @@ func Defaults() *Config {
 		PickTopN:            5,
 		StickyTTLSeconds:    1800,
 		StickyMaxEntries:    2000,
-		SessionRenewDays:    3,
+		SessionNoteDays:     14, // = 客户端申请的登录态时长，超过它就该留意补号节奏
 		QuotaRefreshMinutes: 30,
+		SessionProbeSeconds: 120,
+		SessionDropHits:     3,
 		BalanceFloor:        0,
 		PreferDaily:         true,
 		StrictModelCheck:    true,

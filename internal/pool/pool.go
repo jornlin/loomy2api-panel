@@ -29,6 +29,10 @@ type Options struct {
 	BreakerMax       float64
 	StickyTTL        float64
 	StickyMaxEntries int
+	// SessionProbeSeconds 登录态存疑窗口（秒）：上游回过 401 后先出池这么久等复核。
+	SessionProbeSeconds float64
+	// SessionDropHits 连续 401 达到几次直接判死（复核一直没结论时的兜底）。
+	SessionDropHits int
 	// PreferDaily 选号时把「今日赠送额度 > 0」的账号放前面（见 pickTier）。
 	PreferDaily bool
 	// DeadModelTTL 404 模型失效记录的存活时长（0 = 用 DefaultDeadModelTTL）。
@@ -50,6 +54,9 @@ func DefaultOptions() Options {
 		BreakerMax:       1800,
 		StickyTTL:        1800,
 		StickyMaxEntries: 2000,
+
+		SessionProbeSeconds: 120,
+		SessionDropHits:     3,
 	}
 }
 
@@ -79,6 +86,8 @@ type Pool struct {
 
 	// onSave 落盘钩子（测试可替换）；nil 用默认文件写。
 	onSave func(map[string]any) error
+	// onAccountSave 单账号凭证落盘钩子（由 main 注入 auths 目录；nil = 不落盘）。
+	onAccountSave func(*Account) error
 }
 
 // New 构造账号池（stateFp 为空则不落盘）。
@@ -297,7 +306,7 @@ func (p *Pool) Acquire(exclude []string, model string, sessionKey string) (*Acco
 		// 全冷却时从「非禁用、非暂停、非额度耗尽」的软冷却/熔断账号里选最早到期者顶班。
 		fallback := make([]*Account, 0)
 		for _, a := range all {
-			if skip[a.Name] || !a.Enabled || a.Paused || !a.SessionValid() {
+			if skip[a.Name] || !a.Enabled || a.Paused || !a.HasSession() {
 				continue
 			}
 			if p.floorBlocked(a, model) {
@@ -305,7 +314,13 @@ func (p *Pool) Acquire(exclude []string, model string, sessionKey string) (*Acco
 			}
 			fallback = append(fallback, a)
 		}
+		// 登录态存疑的排到最后：它刚被上游 401 过，比「只是被限流」的号更可能失败。
+		// 仍然留在兜底名单里 —— 全池无号可用时，试一把总好过直接 503。
 		sort.SliceStable(fallback, func(i, j int) bool {
+			si, sj := fallback[i].SessionSuspectLeft(), fallback[j].SessionSuspectLeft()
+			if (si > 0) != (sj > 0) {
+				return sj > 0
+			}
 			return p.cooldownLeft(fallback[i]) < p.cooldownLeft(fallback[j])
 		})
 		for _, a := range fallback {
@@ -376,6 +391,38 @@ func (p *Pool) Acquire(exclude []string, model string, sessionKey string) (*Acco
 	return chosen, nil
 }
 
+// SuspectAccounts 当前处于「登录态存疑」的账号（供 server 复核）。
+func (p *Pool) SuspectAccounts() []*Account {
+	out := []*Account{}
+	for _, a := range p.All() {
+		if a.InSessionSuspect() {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// DropSession 复核确认凭证已死：清空登录态并立刻落盘。
+//
+// 判死的三种入口都走这里：复核调用被 401/403 拒绝、连续 401 达阈值、人工操作。
+// 无密码的号清掉就只剩短信重登一条路，所以调用方必须先拿到证据。
+func (p *Pool) DropSession(a *Account, reason string) {
+	if a == nil {
+		return
+	}
+	a.DropSession(reason)
+	p.persistAccount(a)
+}
+
+// SetAccountSaver 注入「单账号凭证落盘」实现（判死要立刻落盘，而池不持有凭证目录）。
+func (p *Pool) SetAccountSaver(fn func(*Account) error) { p.onAccountSave = fn }
+
+func (p *Pool) persistAccount(a *Account) {
+	if p.onAccountSave != nil {
+		_ = p.onAccountSave(a)
+	}
+}
+
 // Release 释放一个在途名额（必须与 Acquire 成对，defer 里调）。
 func (p *Pool) Release(a *Account) {
 	if a != nil {
@@ -434,10 +481,17 @@ func (p *Pool) ReportFailure(a *Account, status int, body, sessionKey, model str
 		a.CoolSoft(opts.SoftRateBase, opts.SoftRateMax, truncate(body, 120), ResetAtFromBody(body))
 	case FaultSession:
 		// 登录态失效：Loomy 没有 refresh token，只能重新登录。
-		// 一次失败不判死（可能是网络抖动），连败达阈值才禁用。
-		if a.NoteError(opts.BreakerThreshold, opts.BreakerBase, opts.BreakerMax) {
-			a.Enabled = false
-			a.SetLastError("登录态失效（连续失败达阈值，需重新登录）")
+		//
+		// 但不凭一次 401 判死：上游偶尔会因抖动/权限类原因回 401，而无密码的号一旦
+		// 被误清 session 就无法自救。所以先「存疑出池」（立刻停止选它，不再消耗客户端
+		// 请求），由 server 的轻量复核（/points/records）拿结论：
+		//   - 复核也 401/403 → DropSession 判死，并记下实测寿命；
+		//   - 复核通过 → 回池，当作一次抖动。
+		// 复核窗口到期也会自动回池，所以复核机制本身挂掉不会把号永久关在外面；
+		// 而连续 401 达 SessionDropHits 次时直接判死，作为兜底。
+		hits := a.MarkSessionSuspect(opts.SessionProbeSeconds, "登录态存疑（上游 401，复核中）")
+		if opts.SessionDropHits > 0 && hits >= opts.SessionDropHits {
+			p.DropSession(a, fmt.Sprintf("登录态失效（连续 %d 次被上游拒绝，需重新登录）", hits))
 		}
 	case FaultServer:
 		a.NoteError(opts.BreakerThreshold, opts.BreakerBase, opts.BreakerMax)

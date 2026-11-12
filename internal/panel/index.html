@@ -669,6 +669,8 @@ th.sorted[data-dir="desc"]::after { content: " ▼"; font-size: 10px; }
 /* 到期列：剩余天数用弱化色，0 天（今天到期）标黄 */
 .acc .due-in { color: var(--ink-3); font-size: 11px; }
 .acc .due-now { color: var(--warn); font-weight: 600; }
+/* 役龄超过客户端申请的 14 天：只提示「比估计的久」，不代表不可用 */
+.acc .stale-age { color: var(--warn); }
 </style>
 <body>
 <div class="shell">
@@ -1043,9 +1045,15 @@ th.sorted[data-dir="desc"]::after { content: " ▼"; font-size: 10px; }
               <label class="fld"><span class="lb">额度刷新间隔（分钟）</span>
                 <input name="quota_refresh_minutes" type="number" min="1">
                 <span class="hint">每次刷新顺带 first-login（幂等），跨日自动领新周期额度</span></label>
-              <label class="fld"><span class="lb">登录态告警阈值（天）</span>
+              <label class="fld"><span class="lb">登录态役龄播报阈值（天）</span>
                 <input name="session_renew_before_days" type="number" min="0">
-                <span class="hint">剩余低于此天数在日志告警（需重新登录）</span></label>
+                <span class="hint">役龄到点在日志播报一次（默认 14 = 客户端申请值；本地到期日是估计值，不作判据）</span></label>
+              <label class="fld"><span class="lb">登录态复核窗口（秒）</span>
+                <input name="session_probe_seconds" type="number" min="1">
+                <span class="hint">上游回 401 后先出池这么久等复核；复核也 401 才判失效</span></label>
+              <label class="fld"><span class="lb">登录态判死阈值（次）</span>
+                <input name="session_drop_hits" type="number" min="1">
+                <span class="hint">连续 N 次被上游 401 拒绝直接判失效（复核拿不到结论时的兜底）</span></label>
               <label class="fld"><span class="lb">长请求转流式阈值（token）</span>
                 <input name="keepalive_min_tokens" type="number" min="0">
                 <span class="hint">非流式且 max_tokens ≥ 此值时内部转流式取数；0 = 关闭</span></label>

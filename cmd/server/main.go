@@ -58,8 +58,10 @@ func main() {
 	defer p.Close()
 
 	authDir := cfg.Resolve(cfg.AuthDir)
-	if accounts, lerr := pool.LoadAccounts(authDir); lerr == nil && len(accounts) > 0 {
-		p.SyncToDir(accounts)
+	// 判死（清空登录态）必须立刻落盘：否则重启后会把一份已死的凭证又读回来，
+	// 再去上游撞一次 401。池只认凭证内容，不知道目录在哪，所以由这里注入。
+	p.SetAccountSaver(func(a *pool.Account) error { return pool.SaveAccount(authDir, a) })
+	if accounts, lerr := pool.LoadAccounts(authDir); lerr == nil && len(accounts) > 0 {		p.SyncToDir(accounts)
 		p.ApplyState()
 		log.Printf("从 %s 加载 %d 个账号", authDir, len(accounts))
 	} else if lerr != nil {
@@ -143,14 +145,17 @@ func main() {
 	_ = loadedFrom
 }
 
-// background 周期任务：额度刷新、粘性 GC、登录态即将过期提醒。
+// background 周期任务：额度刷新、粘性 GC、登录态役龄播报、登录态存疑复核。
 func background(cfg *config.Config, p *pool.Pool, up *upstream.Client, pl *panel.Panel, stop <-chan struct{}) {
 	quota := time.NewTicker(time.Duration(maxInt(cfg.QuotaRefreshMinutes, 1)) * time.Minute)
 	defer quota.Stop()
 	gc := time.NewTicker(5 * time.Minute)
 	defer gc.Stop()
-	// expiredWarned 记录每个账号最近一次登录态告警日期，避免同一账号反复刷屏。
-	expiredWarned := map[string]string{}
+	// 复核跑得比额度刷新勤：存疑期间账号不接单，靠它尽快给结论。
+	probe := time.NewTicker(30 * time.Second)
+	defer probe.Stop()
+	// noted 记录每个账号最近一次役龄播报的凭证签发时间，避免同一份 session 反复刷屏。
+	noted := map[string]int64{}
 
 	for {
 		select {
@@ -160,31 +165,81 @@ func background(cfg *config.Config, p *pool.Pool, up *upstream.Client, pl *panel
 			if n := p.Sticky().Prune(); n > 0 {
 				log.Printf("会话粘性：清理 %d 条过期绑定", n)
 			}
-			// 登录态即将过期提醒（Loomy 没有 refresh token，只能重登）。
-			// 阈值取 config.session_renew_before_days；每个账号每天只提醒一次，
-			// 否则 5 分钟一轮会把日志刷满。
-			warnDays := cfg.SessionRenewDays
-			if warnDays <= 0 {
-				warnDays = 3
-			}
-			today := time.Now().Format("2006-01-02")
-			for _, a := range p.All() {
-				if !a.Enabled {
-					continue
-				}
-				d := a.DaysLeft()
-				if d < 0 || d >= float64(warnDays) {
-					continue
-				}
-				if expiredWarned[a.Name] == today {
-					continue
-				}
-				expiredWarned[a.Name] = today
-				log.Printf("⚠️  账号 %s 登录态将在 %.1f 小时内过期（阈值 %d 天），请重新登录", a.Name, d*24, warnDays)
-			}
+			noteSessionAge(p, cfg, noted)
+		case <-probe.C:
+			probeSuspectSessions(p, up)
 		case <-quota.C:
 			refreshQuotas(p, up)
 		}
+	}
+}
+
+// noteSessionAge 登录态役龄播报。
+//
+// 只报事实、不喊「请重新登录」：本地 expireAt 是按客户端申请值编出来的估计值
+// （上游不返回过期时间），说「剩余 N 天」是假精确。役龄超过申请值只说明这份凭证
+// 活得比客户端要求的久 —— 上游照常服务，唯一权威仍是 401。每份 session 只报一次。
+func noteSessionAge(p *pool.Pool, cfg *config.Config, noted map[string]int64) {
+	noteDays := cfg.SessionNoteDays
+	if noteDays <= 0 {
+		noteDays = 14
+	}
+	for _, a := range p.All() {
+		if !a.Enabled || !a.HasSession() {
+			continue
+		}
+		age := a.SessionAgeDays()
+		if age < float64(noteDays) {
+			continue
+		}
+		if noted[a.Name] == a.ObtainedAt {
+			continue
+		}
+		noted[a.Name] = a.ObtainedAt
+		how := "无密码，失效后只能短信重登"
+		if a.Password != "" {
+			how = "有密码，可点面板「登录」换新"
+		}
+		extra := ""
+		if a.ObservedLifetime > 0 {
+			extra = fmt.Sprintf("；此前实测寿命 ≥ %.1f 天", float64(a.ObservedLifetime)/86400)
+		}
+		log.Printf("登录态：账号 %s 已服役 %.1f 天（客户端申请 %d 天，本地到期日是估计值、不作判据%s），仍在上游正常使用，死活以上游 401 为准（%s）",
+			a.Name, age, noteDays, extra, how)
+	}
+}
+
+// probeSuspectSessions 复核「登录态存疑」的账号。
+//
+// 上游回过 401 后账号会出池等复核，这里用最便宜的一次读接口（/points/records）拿结论：
+//   - 也回 401/403 → 凭证真死，清空登录态并记下实测寿命（无密码的号无法自救，所以要证据）；
+//   - 其余结果（200 / 网络错误 / 5xx）→ 不下结论：200 就回池当抖动，其它让存疑窗口
+//     自然到期回池，避免一次网络抖动把好号判死。
+func probeSuspectSessions(p *pool.Pool, up *upstream.Client) {
+	for _, a := range p.SuspectAccounts() {
+		sess := a.Session
+		if sess == "" {
+			a.ClearSessionSuspect()
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		status, body := up.ProbeSession(ctx, sess)
+		cancel()
+
+		if status == 0 { // 传输层失败：不下结论
+			continue
+		}
+		if pool.Classify(status, body) == pool.FaultSession {
+			life := ""
+			if a.ObtainedAt > 0 {
+				life = fmt.Sprintf("，该凭证实测寿命 %.1f 天", float64(time.Now().Unix()-a.ObtainedAt)/86400)
+			}
+			p.DropSession(a, fmt.Sprintf("登录态失效（上游 %d 拒绝，需重新登录）", status))
+			log.Printf("账号 %s 登录态复核不通过（HTTP %d），已清空登录态%s", a.Name, status, life)
+			continue
+		}
+		a.ClearSessionSuspect()
+		log.Printf("账号 %s 登录态复核通过（HTTP %d），已回到轮换", a.Name, status)
 	}
 }
 
@@ -194,7 +249,7 @@ func refreshQuotas(p *pool.Pool, up *upstream.Client) {
 	done := make(chan struct{})
 	count := 0
 	for _, a := range p.All() {
-		if !a.Enabled || !a.SessionValid() {
+		if !a.Enabled || !a.HasSession() {
 			continue
 		}
 		count++

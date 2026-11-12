@@ -1,9 +1,17 @@
 // Package pool 账号池：账号模型、选号、冷却/熔断、会话粘性、在途租约与状态持久化。
 //
 // 语义对齐 workbuddy2api-panel 的账号池，按 Loomy 的凭证形态重写：
-//   - Loomy 没有 refresh token，登录态 14 天到期只能重新登录；
+//   - Loomy 没有 refresh token，登录态失效只能重新登录；
 //     因此账号以「手机号 + 密码」为长期凭证，session 是可再生的工作凭证。
 //   - 上游额度是积分（points）；余额耗尽属于硬冷却，等日额度重置。
+//
+// 登录态判据（对齐 loomy2api 的 v2 模型，2026-11-13 迁移）：
+//   - 上游登录响应**不返回过期时间**，`expire_at` 是按客户端申请值（14 天）编出来的
+//     估计值，只用于展示与役龄播报，**绝不参与路由判定**。旧的「本地到期就摘号」
+//     会让上游还活着的凭证提前离开轮换（loomy-3147 实锤：本地过期 6 小时后仍可用）。
+//   - 「手里有 session」才是本地上唯一的可用判据；凭证死活的唯一权威是上游 401/403。
+//   - 一次 401 不等于判死（可能是抖动），先「存疑出池 + 轻量复核」，复核确认后才清
+//     session —— 无密码的号被误清就无法自救，判死必须谨慎。
 package pool
 
 import (
@@ -40,8 +48,14 @@ type Account struct {
 
 	Session    string `json:"session,omitempty"`
 	UserID     string `json:"userid,omitempty"`
-	ExpireAt   int64  `json:"expireAt,omitempty"`
-	ObtainedAt int64  `json:"obtainedAt,omitempty"`
+	// ExpireAt 本地估计的登录态到期墙钟（= ObtainedAt + 客户端申请的 14 天）。
+	// 上游没有下发过期时间，所以这是**编出来的估计值，只用于展示**，不作判据。
+	ExpireAt   int64 `json:"expireAt,omitempty"`
+	ObtainedAt int64 `json:"obtainedAt,omitempty"`
+	// ObservedLifetime 实测登录态寿命（秒）：某份 session 被上游 401/403 拒绝时，
+	// 记下「被拒那一刻的役龄」。这是唯一能学到真实 TTL 的时刻，落盘且只记一次
+	// （字段名沿用 loomy2api 的 observedLifetime，两边凭证文件可以互搬）。
+	ObservedLifetime int64 `json:"observedLifetime,omitempty"`
 
 	Identity account.Identity `json:"identity,omitempty"`
 
@@ -83,6 +97,14 @@ type runtime struct {
 
 	lastError     string
 	dailyConsumed int64
+
+	// suspectUntil 登录态存疑截止墙钟：上游回过 401、但复核还没结论。
+	// 存疑期间不参与选号（Healthy 为假），窗口自然到期也会自动回池 ——
+	// 复核本身失败（网络问题）不该把号永久关在外面。
+	suspectUntil float64
+	// suspectHits 连续「上游 401」次数（一次成功调用即清零）：累计到阈值直接判死，
+	// 避免复核一直拿不到结论时反复出池-回池。
+	suspectHits int
 }
 
 type modelCooldown struct {
@@ -112,14 +134,35 @@ func (r *runtime) absorb(src *runtime) {
 	r.inflight = src.inflight
 	r.lastError = src.lastError
 	r.dailyConsumed = src.dailyConsumed
+	r.suspectUntil = src.suspectUntil
+	r.suspectHits = src.suspectHits
 }
 
-// SessionValid 登录态是否仍未过期且有值。
-func (a *Account) SessionValid() bool {
-	return a.Session != "" && (a.ExpireAt == 0 || a.ExpireAt > time.Now().Unix())
+// HasSession 手里是否有凭证 —— 本地上唯一的「能不能用」判据。
+//
+// 不看 expire_at：那是按客户端申请值编出来的估计值（见包注释）。真死只有一种表现，
+// 就是上游 401/403 之后被 DropSession 清空。
+func (a *Account) HasSession() bool {
+	return a.Session != ""
 }
 
-// DaysLeft 登录态剩余天数（未设置过期时间返回 -1）。
+// SessionAgeDays 当前凭证已服役天数（无凭证或不知签发时间返回 -1）。
+//
+// 面板与日志一律报「已服役 N 天」而不报「剩余 N 天」：前者是事实，后者是估计。
+func (a *Account) SessionAgeDays() float64 {
+	if a.Session == "" || a.ObtainedAt <= 0 {
+		return -1
+	}
+	return float64(time.Now().Unix()-a.ObtainedAt) / 86400
+}
+
+// SessionStale 役龄是否已超过客户端申请的 14 天（**仅展示**，不参与任何判定）。
+func (a *Account) SessionStale() bool {
+	age := a.SessionAgeDays()
+	return age >= 0 && age >= float64(account.SessionExpireSeconds)/86400
+}
+
+// DaysLeft 本地估计的登录态剩余天数（无估计返回 -1）。**仅展示**。
 func (a *Account) DaysLeft() float64 {
 	if a.ExpireAt == 0 {
 		return -1
@@ -146,7 +189,91 @@ func (a *Account) Healthy() bool {
 	a.rt.mu.Lock()
 	defer a.rt.mu.Unlock()
 	n := nowF()
-	return a.Enabled && !a.Paused && a.SessionValid() && a.rt.cooldownUntil <= n && a.rt.breakerUntil <= n
+	return a.Enabled && !a.Paused && a.HasSession() &&
+		a.rt.cooldownUntil <= n && a.rt.breakerUntil <= n && a.rt.suspectUntil <= n
+}
+
+// ---------------------------------------------------------- 登录态存疑与判死
+
+// MarkSessionSuspect 标记「登录态存疑」：上游刚回过 401，但结论未定。
+//
+// 存疑期间不参与选号，避免每一次客户端请求都去踩一遍这个号；窗口到期（或复核
+// 通过 ClearSessionSuspect）自动回池。返回累计的连续 401 次数，供调用方决定
+// 是否直接判死。
+func (a *Account) MarkSessionSuspect(window float64, reason string) int {
+	if window < 1 {
+		window = 1
+	}
+	a.rt.mu.Lock()
+	defer a.rt.mu.Unlock()
+	a.rt.suspectHits++
+	a.rt.suspectUntil = nowF() + window
+	if reason != "" {
+		a.rt.lastError = reason
+	}
+	return a.rt.suspectHits
+}
+
+// ClearSessionSuspect 复核通过：撤销存疑，回到轮换。
+func (a *Account) ClearSessionSuspect() {
+	a.rt.mu.Lock()
+	defer a.rt.mu.Unlock()
+	a.rt.suspectUntil = 0
+}
+
+// InSessionSuspect 是否处于登录态存疑期。
+func (a *Account) InSessionSuspect() bool {
+	a.rt.mu.Lock()
+	defer a.rt.mu.Unlock()
+	return a.rt.suspectUntil > nowF()
+}
+
+// SessionSuspectLeft 存疑剩余秒数（0 = 不在存疑）。
+func (a *Account) SessionSuspectLeft() float64 {
+	a.rt.mu.Lock()
+	defer a.rt.mu.Unlock()
+	if d := a.rt.suspectUntil - nowF(); d > 0 {
+		return d
+	}
+	return 0
+}
+
+// SessionSuspectHits 连续 401 次数（一次成功调用清零）。
+func (a *Account) SessionSuspectHits() int {
+	a.rt.mu.Lock()
+	defer a.rt.mu.Unlock()
+	return a.rt.suspectHits
+}
+
+// RecordObservedLifetime 记下这份凭证的实测寿命（只记第一次被上游拒绝的那次）。
+func (a *Account) RecordObservedLifetime() {
+	if a.ObtainedAt <= 0 || a.ObservedLifetime > 0 {
+		return
+	}
+	d := time.Now().Unix() - a.ObtainedAt
+	if d < 0 {
+		d = 0
+	}
+	a.ObservedLifetime = d
+}
+
+// DropSession 判死：清空凭证（立即退出轮换），保留账号本身与计数。
+//
+// 只有两种情况下调用：复核调用也被上游 401/403 拒绝，或连续 401 次数达阈值。
+// 清空后账号只能靠人工重登（有密码可点面板「登录」，无密码只能短信重登），
+// 所以这一步必须由证据支撑。
+func (a *Account) DropSession(reason string) {
+	a.RecordObservedLifetime()
+	a.Session = ""
+	a.ExpireAt = 0
+	a.rt.mu.Lock()
+	defer a.rt.mu.Unlock()
+	a.rt.suspectUntil = 0
+	a.rt.cooldownUntil = 0
+	a.rt.coolKind = ""
+	a.rt.breakerUntil = 0
+	a.rt.breakerFails = 0
+	a.rt.lastError = reason
 }
 
 // HealthyForModel 模型感知的健康判定：被该模型限流的账号换模型仍可用。
@@ -309,6 +436,9 @@ func (a *Account) NoteSuccess() {
 		a.rt.cooldownUntil = 0
 		a.rt.coolKind = ""
 	}
+	// 这次请求真的成功了 = 登录态没问题，撤掉存疑与计数。
+	a.rt.suspectUntil = 0
+	a.rt.suspectHits = 0
 	a.rt.lastError = ""
 }
 
@@ -326,6 +456,9 @@ func (a *Account) ResetCooldowns() {
 	// 解冻意味着「已恢复正常」，留着解冻前那条错误只会误导。
 	// 登录成功、余额恢复自动解冻也都走这里，所以错误描述随之自动消除。
 	a.rt.lastError = ""
+	// 登录态存疑同理：人工解冻 / 重登成功就是「这个号没问题」的表态。
+	a.rt.suspectUntil = 0
+	a.rt.suspectHits = 0
 }
 
 // Touch 记录一次使用。
@@ -434,6 +567,8 @@ func (a *Account) Public() map[string]any {
 		}
 	}
 	breakerFails := a.rt.breakerFails
+	suspectLeft := a.rt.suspectUntil - n
+	suspectHits := a.rt.suspectHits
 	a.rt.mu.Unlock()
 
 	sess := ""
@@ -458,8 +593,16 @@ func (a *Account) Public() map[string]any {
 		"has_password":          a.Password != "",
 		"proxy":                 a.Proxy,
 		"session":               sess,
-		"session_valid":         a.SessionValid(),
-		"session_days_left":     nil,
+		// session_valid = 手里还有凭证。真死（上游拒绝后清空）才会变 false；
+		// 本地上「到期」不再是判据，所以它不再会因为役龄而翻成 false。
+		"session_valid":         a.HasSession(),
+		"session_days_left":     nil, // 本地估计的剩余天数（仅展示，见 session_age_days）
+		"session_age_days":      nil, // 役龄：面板一律报这个，不报「剩余」
+		"session_stale":         a.SessionStale(),
+		"session_suspect":       suspectLeft > 0,
+		"session_suspect_left":  maxF(round1(suspectLeft), 0),
+		"session_suspect_hits":  suspectHits,
+		"observed_lifetime_days": nil,
 		"expire_at":             a.ExpireAt,
 		"checkin_done":          a.CheckinDone(),
 		"balance":               nil,
@@ -495,6 +638,12 @@ func (a *Account) Public() map[string]any {
 	}
 	if d := a.DaysLeft(); d >= 0 {
 		out["session_days_left"] = round2(d)
+	}
+	if age := a.SessionAgeDays(); age >= 0 {
+		out["session_age_days"] = round2(age)
+	}
+	if a.ObservedLifetime > 0 {
+		out["observed_lifetime_days"] = round2(float64(a.ObservedLifetime) / 86400)
 	}
 	if a.Balance != nil {
 		out["balance"] = *a.Balance
@@ -567,7 +716,9 @@ func AccountFromMap(raw map[string]any, index int) *Account {
 		UserID:     strOf(raw["userid"]),
 		ExpireAt:   int64Of(raw["expireAt"], raw["expire_at"]),
 		ObtainedAt: int64Of(raw["obtainedAt"], raw["obtained_at"]),
-		Requests:   int64Of(raw["requests"]),
+		// 兼容 loomy2api 的 observedLifetime（两边凭证文件可互搬）。
+		ObservedLifetime: int64Of(raw["observedLifetime"], raw["observed_lifetime"]),
+		Requests:         int64Of(raw["requests"]),
 		PointsUsed: int64Of(raw["pointsUsed"], raw["points_used"]),
 		Failures:   int64Of(raw["failures"]),
 	}
@@ -654,6 +805,10 @@ func (a *Account) persisted() map[string]any {
 	}
 	if a.ObtainedAt != 0 {
 		out["obtainedAt"] = a.ObtainedAt
+	}
+	// 实测寿命必须落盘：这是唯一学到的真实 TTL，重启后还得用来指导补号节奏。
+	if a.ObservedLifetime != 0 {
+		out["observedLifetime"] = a.ObservedLifetime
 	}
 	if a.Identity.DevID != "" {
 		out["identity"] = a.Identity

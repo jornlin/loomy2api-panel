@@ -372,7 +372,7 @@ func (p *Panel) addAccount(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	p.persist(acc)
-	p.Logf("新增账号 %s（登录态 %v）", acc.Name, acc.SessionValid())
+	p.Logf("新增账号 %s（登录态 %v）", acc.Name, acc.HasSession())
 	go p.checkinAndRefresh(acc)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "account": acc.Public()})
 }
@@ -454,7 +454,7 @@ func (p *Panel) checkinAll(w http.ResponseWriter, r *http.Request) {
 	var results []result
 
 	for _, a := range accounts {
-		if !a.Enabled || !a.SessionValid() {
+		if !a.Enabled || !a.HasSession() {
 			continue
 		}
 		wg.Add(1)
@@ -488,7 +488,7 @@ func (p *Panel) checkinAll(w http.ResponseWriter, r *http.Request) {
 
 // doCheckinCtx 领取每日赠送积分（幂等），成功后把口径快照写回账号。
 func (p *Panel) doCheckinCtx(ctx context.Context, acc *pool.Account) (*upstream.CheckinResult, error) {
-	if !acc.SessionValid() {
+	if !acc.HasSession() {
 		return nil, fmt.Errorf("登录态已失效，需要重新登录")
 	}
 	res, err := p.upstream.Checkin(ctx, acc.Session)
@@ -557,7 +557,7 @@ func (p *Panel) onboardingAll(w http.ResponseWriter, r *http.Request) {
 	var results []result
 
 	for _, a := range p.pool.All() {
-		if !a.Enabled || !a.SessionValid() {
+		if !a.Enabled || !a.HasSession() {
 			continue
 		}
 		wg.Add(1)
@@ -591,7 +591,7 @@ func (p *Panel) onboardingAll(w http.ResponseWriter, r *http.Request) {
 // 服务端不校验前置行为（实测不真的发对话/生成 PPT 也能拿满 10000），所以这是
 // 纯 API 直领、零 token 消耗；幂等判据是响应体的 alreadyCompleted。
 func (p *Panel) claimOnboardingCtx(ctx context.Context, acc *pool.Account) ([]string, int64, error) {
-	if !acc.SessionValid() {
+	if !acc.HasSession() {
 		return nil, 0, fmt.Errorf("登录态已失效，需要重新登录")
 	}
 	claimed, points, err := p.upstream.ClaimOnboarding(ctx, acc.Session)
@@ -705,7 +705,7 @@ func (p *Panel) refreshAll(w http.ResponseWriter, r *http.Request) {
 	var mu sync.Mutex
 	results := make([]map[string]any, 0, len(accounts))
 	for _, a := range accounts {
-		if !a.Enabled || !a.SessionValid() {
+		if !a.Enabled || !a.HasSession() {
 			continue
 		}
 		wg.Add(1)
@@ -777,7 +777,7 @@ func (p *Panel) checkinAndRefresh(acc *pool.Account) {
 }
 
 func (p *Panel) refreshQuotaCtx(ctx context.Context, acc *pool.Account) error {
-	if !acc.SessionValid() {
+	if !acc.HasSession() {
 		return fmt.Errorf("登录态已失效，需要重新登录")
 	}
 	balance, err := p.upstream.Quota(ctx, acc.Session)
@@ -796,7 +796,7 @@ func (p *Panel) persist(acc *pool.Account) {
 
 func (p *Panel) anySession() string {
 	for _, a := range p.pool.All() {
-		if a.Enabled && a.SessionValid() {
+		if a.Enabled && a.HasSession() {
 			return a.Session
 		}
 	}
@@ -839,6 +839,9 @@ func poolOptions(cfg *config.Config) pool.Options {
 		BreakerMax:       float64(cfg.BreakerMaxSeconds),
 		StickyTTL:        float64(cfg.StickyTTLSeconds),
 		StickyMaxEntries: cfg.StickyMaxEntries,
+
+		SessionProbeSeconds: float64(cfg.SessionProbeSeconds),
+		SessionDropHits:     cfg.SessionDropHits,
 		PreferDaily:      cfg.PreferDaily,
 		DeadModelTTL:     time.Duration(cfg.DeadModelTTLDays) * 24 * time.Hour,
 	}

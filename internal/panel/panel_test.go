@@ -280,8 +280,11 @@ func TestAddAccountWithSession(t *testing.T) {
 	if acc.Session != "my-session-token" {
 		t.Errorf("session 未设置: %q", acc.Session)
 	}
-	if !acc.SessionValid() {
-		t.Error("应设置 14 天有效期")
+	if !acc.HasSession() {
+		t.Error("手填 session 的账号应直接可用")
+	}
+	if acc.SessionAgeDays() < 0 {
+		t.Error("应记录签发时间用于役龄展示")
 	}
 	// 凭证应落盘
 	if _, err := pool.LoadAccounts(pl.cfg.Resolve(pl.cfg.AuthDir)); err != nil {
@@ -613,9 +616,13 @@ func TestCheckinAll(t *testing.T) {
 	defer srv.Close()
 
 	pl, p := newTestPanelUpstream(t, srv.URL)
-	expired := time.Now().Add(-time.Hour).Unix()
-	p.Add(&pool.Account{Name: "acc2", Enabled: true, Session: "sess-2", ExpireAt: expired})
+	// acc2 的本地到期时间已过，但凭证还在：本地到期只是估计值，不作判据，
+	// 该照常签到（不然「活得比 14 天久」的号会被自己摘掉）。
+	p.Add(&pool.Account{Name: "acc2", Enabled: true, Session: "sess-2",
+		ExpireAt: time.Now().Add(-time.Hour).Unix(), ObtainedAt: time.Now().Add(-15 * 24 * time.Hour).Unix()})
+	// acc3 被禁用；acc4 没有凭证（真死）——这两个才是该跳过的。
 	p.Add(&pool.Account{Name: "acc3", Enabled: false, Session: "sess-3", ExpireAt: time.Now().Add(72 * time.Hour).Unix()})
+	p.Add(&pool.Account{Name: "acc4", Enabled: true})
 
 	req := httptest.NewRequest(http.MethodPost, "/panel/api/checkin_all", nil)
 	w := httptest.NewRecorder()
@@ -624,18 +631,24 @@ func TestCheckinAll(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("状态码 %d body %s", w.Code, w.Body.String())
 	}
-	if hits != 1 {
-		t.Errorf("first-login 应只打 1 次（acc1），实际 %d", hits)
+	if hits != 2 {
+		t.Errorf("first-login 应打 2 次（acc1 + 本地过期的 acc2），实际 %d", hits)
 	}
 	var out map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &out)
 	results, _ := out["results"].([]any)
-	if len(results) != 1 {
-		t.Fatalf("结果数 %d，期望 1（跳过过期与禁用）", len(results))
+	if len(results) != 2 {
+		t.Fatalf("结果数 %d，期望 2（跳过禁用与无凭证）", len(results))
 	}
-	item, _ := results[0].(map[string]any)
-	if item["name"] != "acc1" || item["ok"] != true || item["granted"] != false {
-		t.Errorf("结果项不对: %v", item)
+	// 并发收集，顺序不保证，按名字找。
+	var item map[string]any
+	for _, r := range results {
+		if m, _ := r.(map[string]any); m["name"] == "acc1" {
+			item = m
+		}
+	}
+	if item == nil || item["ok"] != true || item["granted"] != false {
+		t.Errorf("acc1 结果项不对: %v", item)
 	}
 }
 
@@ -822,8 +835,8 @@ func TestOnboardingAllSkipsInvalid(t *testing.T) {
 	defer srv.Close()
 
 	pl, p := newTestPanelUpstream(t, srv.URL)
-	p.Add(&pool.Account{Name: "dead", Enabled: true, Session: "s-dead",
-		ExpireAt: time.Now().Add(-time.Hour).Unix()})
+	// dead = 真死（凭证被清空），off = 禁用；本地到期时间不算「无效」。
+	p.Add(&pool.Account{Name: "dead", Enabled: true})
 	p.Add(&pool.Account{Name: "off", Enabled: false, Session: "s-off",
 		ExpireAt: time.Now().Add(72 * time.Hour).Unix()})
 

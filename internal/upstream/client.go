@@ -370,6 +370,23 @@ func (q *Quota) dailyRemaining() *int64 {
 	return &left
 }
 
+// ProbeSession 一次最便宜的凭证探活：只读 /points/records 第一页，返回状态码与
+// （截断的）响应体，交由调用方用 pool.Classify 判定。
+//
+// 用途是「登录态存疑」复核：账号因 401 出池后，需要在不消耗积分、不产生副作用的
+// 前提下确认凭证到底死没死。传输层失败返回 0 —— 那表示「没拿到结论」，不是判死依据。
+func (c *Client) ProbeSession(ctx context.Context, session string) (int, string) {
+	ctx, cancel := context.WithTimeout(ctx, c.Timeout)
+	defer cancel()
+	resp, err := c.Do(ctx, http.MethodGet, "points/records?record_type=all&pageNo=1&pageSize=1", session, nil, nil)
+	if err != nil {
+		return 0, err.Error()
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	return resp.Status, string(raw)
+}
+
 // Quota 查询积分余额。上游只认 camelCase 的 pageSize（下划线会被静默忽略）。
 //
 // 两个端点都打：records 给余额，first-login 给每日额度口径。first-login 是

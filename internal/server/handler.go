@@ -230,7 +230,7 @@ func fallbackOr(cached []config.Model) []config.Model {
 // anySession 取任一健康账号的登录态（用于只读查询）。
 func (h *Handler) anySession() string {
 	for _, a := range h.Pool.All() {
-		if a.Enabled && a.SessionValid() {
+		if a.Enabled && a.HasSession() {
 			return a.Session
 		}
 	}

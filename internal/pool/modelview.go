@@ -37,7 +37,7 @@ func (p *Pool) ModelLockView() []ModelLockRow {
 	routable := 0 // 参与选号的账号总数
 
 	for _, a := range all {
-		if !a.Enabled || a.Paused || !a.SessionValid() {
+		if !a.Enabled || a.Paused || !a.HasSession() {
 			continue
 		}
 		routable++
@@ -77,7 +77,7 @@ func (p *Pool) ModelLockView() []ModelLockRow {
 			Reason:   r.reason,
 		}
 		for _, a := range all {
-			if !a.Enabled || a.Paused || !a.SessionValid() {
+			if !a.Enabled || a.Paused || !a.HasSession() {
 				continue
 			}
 			if a.HealthyForModel(r.model) {

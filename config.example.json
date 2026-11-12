@@ -97,8 +97,14 @@
   "sticky_max_entries": 2000,
   "_sticky_max_entries": "粘性表容量上限",
 
-  "session_renew_before_days": 3,
-  "_session_renew_before_days": "登录态剩余天数低于此值时在日志里告警（上游无 refresh token，只能重登）",
+  "session_renew_before_days": 14,
+  "_session_renew_before_days": "登录态役龄播报阈值（天）：役龄到点在日志播报一次。键名是历史遗留（语义已从「剩余 N 天告警」改为「已服役 N 天播报」）—— 上游登录响应不返回过期时间，本地 expireAt 是按客户端申请值编的估计值，只作展示，不作判据",
+
+  "session_probe_seconds": 120,
+  "_session_probe_seconds": "登录态存疑窗口（秒）：上游回 401 后账号先出池这么久等复核（最便宜的一次读接口），复核也 401/403 才清空登录态；窗口到期会自动回池，所以复核机制本身故障不会把号永久关在外面",
+
+  "session_drop_hits": 3,
+  "_session_drop_hits": "连续 N 次被上游 401 拒绝直接判失效（复核一直拿不到结论时的兜底）；一次成功调用即清零",
 
   "quota_refresh_minutes": 30,
   "_quota_refresh_minutes": "后台全量额度刷新间隔（分钟）",

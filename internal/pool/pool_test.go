@@ -219,6 +219,158 @@ func TestStickyUnbindOnFailure(t *testing.T) {
 	}
 }
 
+// TestLocalExpiryDoesNotBlockRotation 本地估计的到期时间不作判据。
+//
+// 回归 loomy-3147：上游不返回过期时间，expireAt 是按客户端申请值（14 天）编出来的
+// 估计值。上游的凭证往往活得比它久，拿它当门槛会把还活着的号提前摘出轮换
+// （旧行为：11-21 一天摘掉 136 个号）。
+func TestLocalExpiryDoesNotBlockRotation(t *testing.T) {
+	p := New("")
+	p.SetOptions(Options{Strategy: "round_robin", StickyTTL: 1800})
+	a := newTestAccount("aged", 500, true)
+	a.ExpireAt = time.Now().Add(-6 * time.Hour).Unix()  // 本地「已过期」
+	a.ObtainedAt = time.Now().Add(-15 * 24 * time.Hour).Unix() // 已服役 15 天
+	p.Add(a)
+
+	if !a.HasSession() {
+		t.Error("有凭证就该可用")
+	}
+	if !a.SessionStale() {
+		t.Error("服役 15 天应标记为「超过客户端申请值」（仅展示用）")
+	}
+	if !a.Healthy() {
+		t.Error("本地到期不该让账号不健康")
+	}
+	got, err := p.Acquire(nil, "m", "")
+	if err != nil || got == nil || got.Name != "aged" {
+		t.Fatalf("本地到期的号仍应参与轮换: acc=%v err=%v", got, err)
+	}
+}
+
+// TestFaultSessionSuspectThenDrop 401 先存疑出池，复核确认后才判死。
+func TestFaultSessionSuspectThenDrop(t *testing.T) {
+	p := New("")
+	p.SetOptions(Options{Strategy: "round_robin", SessionProbeSeconds: 120, SessionDropHits: 3})
+	var saved int
+	p.SetAccountSaver(func(a *Account) error { saved++; return nil })
+	a := newTestAccount("a", 500, true)
+	a.ObtainedAt = time.Now().Add(-15 * 24 * time.Hour).Unix()
+	p.Add(a)
+	healthy := newTestAccount("b", 500, true)
+	p.Add(healthy)
+
+	// 第一次 401：只存疑，凭证还在，但正常选号不再选它。
+	p.ReportFailure(a, 401, "unauthorized", "", "m")
+	if !a.HasSession() {
+		t.Fatal("一次 401 不该判死（可能是抖动）")
+	}
+	if !a.InSessionSuspect() {
+		t.Error("应进入存疑期")
+	}
+	if a.Healthy() {
+		t.Error("存疑期间不该参与选号")
+	}
+	for i := 0; i < 10; i++ {
+		got, err := p.Acquire(nil, "m", "")
+		if err != nil {
+			t.Fatalf("有健康账号时不该选不到: %v", err)
+		}
+		p.Release(got)
+		if got.Name == "a" {
+			t.Fatal("存疑账号不该被选中")
+		}
+	}
+	if n := len(p.SuspectAccounts()); n != 1 {
+		t.Errorf("存疑快照应有 1 个账号，实际 %d", n)
+	}
+
+	// 复核确认凭证已死。
+	p.DropSession(a, "登录态失效（上游 401 拒绝，需重新登录）")
+	if a.HasSession() {
+		t.Error("判死后不该还留着凭证")
+	}
+	if a.Healthy() {
+		t.Error("判死后不该可用")
+	}
+	if a.ObservedLifetime <= 0 || a.ObservedLifetime < int64(14*24*3600) {
+		t.Errorf("应记录实测寿命，实际 %d", a.ObservedLifetime)
+	}
+	if saved == 0 {
+		t.Error("判死必须立刻落盘")
+	}
+	if len(p.SuspectAccounts()) != 0 {
+		t.Error("判死后不该还留在存疑快照里")
+	}
+}
+
+// TestFaultSessionDropAfterHits 复核一直没结论时，连续 401 达阈值直接判死。
+func TestFaultSessionDropAfterHits(t *testing.T) {
+	p := New("")
+	p.SetOptions(Options{SessionProbeSeconds: 120, SessionDropHits: 3})
+	a := newTestAccount("a", 500, true)
+	p.Add(a)
+
+	for i := 1; i <= 2; i++ {
+		p.ReportFailure(a, 401, "unauthorized", "", "m")
+		if !a.HasSession() {
+			t.Fatalf("第 %d 次 401 不该判死（阈值 3）", i)
+		}
+	}
+	p.ReportFailure(a, 401, "unauthorized", "", "m")
+	if a.HasSession() {
+		t.Error("连续 3 次 401 应判死")
+	}
+}
+
+// TestSuspectClearedBySuccess 复核窗口内客户端请求成功 = 凭证没问题，撤销存疑。
+func TestSuspectClearedBySuccess(t *testing.T) {
+	p := New("")
+	p.SetOptions(Options{SessionProbeSeconds: 120, SessionDropHits: 3})
+	a := newTestAccount("a", 500, true)
+	p.Add(a)
+
+	p.ReportFailure(a, 401, "unauthorized", "", "m")
+	a.ClearSessionSuspect() // 复核通过（server 侧调用）
+	if !a.Healthy() {
+		t.Error("撤销存疑后应回到轮换")
+	}
+	p.ReportSuccess(a, "", "m", 0)
+	if a.SessionSuspectHits() != 0 {
+		t.Errorf("成功后连续 401 计数应清零，实际 %d", a.SessionSuspectHits())
+	}
+}
+
+// TestObservedLifetimeRecordedOnce 实测寿命只记第一次，且能落盘/回读。
+func TestObservedLifetimeRecordedOnce(t *testing.T) {
+	dir := t.TempDir()
+	a := newTestAccount("a", 500, true)
+	a.ObtainedAt = time.Now().Add(-12 * 24 * time.Hour).Unix()
+
+	a.DropSession("登录态失效")
+	first := a.ObservedLifetime
+	if first < int64(11*24*3600) || first > int64(13*24*3600) {
+		t.Fatalf("实测寿命应在 12 天附近，实际 %d", first)
+	}
+	// 重新登录后再死一次：不得覆盖已学到的值。
+	a.Session = "new"
+	a.ObtainedAt = time.Now().Add(-time.Hour).Unix()
+	a.DropSession("登录态失效")
+	if a.ObservedLifetime != first {
+		t.Errorf("实测寿命不该被覆盖：%d → %d", first, a.ObservedLifetime)
+	}
+
+	if err := SaveAccount(dir, a); err != nil {
+		t.Fatalf("落盘失败: %v", err)
+	}
+	back, err := LoadAccounts(dir)
+	if err != nil || len(back) != 1 {
+		t.Fatalf("回读失败: %v %d", err, len(back))
+	}
+	if back[0].ObservedLifetime != first {
+		t.Errorf("实测寿命未落盘: %d", back[0].ObservedLifetime)
+	}
+}
+
 // TestLastErrorClearedOnSuccess 面板「状态」下的错误描述是当前状态：下一次
 // 成功调用必须把它清掉，否则一条早已恢复的错误会一直挂在面板上。
 func TestLastErrorClearedOnSuccess(t *testing.T) {

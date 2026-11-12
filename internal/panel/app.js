@@ -592,6 +592,13 @@ function accountStatus(s, now) {
   if (s.disabled) return { cls: 'off', tag: '<span class="tag bad">已禁用</span>' };
   // 暂停选号：与禁用同属「不可选」，但照常签到/刷额度保号。
   if (s.paused) return { cls: 'off', tag: '<span class="tag warn">已暂停选号</span>' };
+  // 登录态存疑：上游刚回过 401，正在复核（复核也 401 才判死）。
+  // 排在冷却前面：它现在不接单的原因是凭证可疑，不是被限流。
+  if (s.session_suspect) {
+    const tip = '上游刚返回 401，正在复核登录态（复核也 401 才判为失效）\n已在池外，不参与选号';
+    return { cls: 'cool', tag: '<span class="tag warn" title="' + esc(tip) + '">登录态复核中'
+      + (s.session_suspect_left ? ' · ' + dur(s.session_suspect_left) : '') + '</span>' };
+  }
   const cool = Math.max(Number(s.cooldown_seconds_left || 0), Number(s.breaker_seconds_left || 0));
   if (cool > 0) {
     const bl = Number(s.breaker_seconds_left || 0);
@@ -599,8 +606,28 @@ function accountStatus(s, now) {
       : (s.cooldown_kind === 'hard' ? '额度冷却' : '限流冷却');
     return { cls: 'cool', tag: '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>' };
   }
+  // session_valid = 手里还有凭证（上游拒绝后才清空）。本地「到期」不是判据：
+  // 上游不返回过期时间，本地到期日是按客户端申请值编的估计值。
   if (!s.session_valid) return { cls: 'off', tag: '<span class="tag bad">登录态失效</span>' };
   return { cls: '', tag: '<span class="tag ok">可用</span>' };
+}
+
+// ageCell 役龄展示：一律报「已服役 N 天」（事实）而不是「剩余 N 天」（估计值）。
+// 超过客户端申请的 14 天只标黄提示，不代表不可用 —— 上游照常服务，死活看 401。
+function ageCell(s) {
+  const age = s.session_age_days;
+  if (age == null) return '';
+  const txt = ' · 已服役 ' + Number(age).toFixed(1) + 'd';
+  let tip = '该凭证已服役 ' + Number(age).toFixed(1) + ' 天';
+  if (s.observed_lifetime_days != null) {
+    tip += '\n同类凭证实测寿命：' + Number(s.observed_lifetime_days).toFixed(1) + ' 天';
+  }
+  if (s.session_stale) {
+    tip += '\n已超过客户端申请的 14 天（那是申请值、不是上游下发的到期时间）'
+      + '\n仍在上游正常使用：凭证死活以上游 401 为准';
+    return '<span class="stale-age" title="' + esc(tip) + '">' + txt + '</span>';
+  }
+  return '<span title="' + esc(tip) + '">' + txt + '</span>';
 }
 
 // modelLocksHtml 账号行内的模型级限流小框（数据是 account.model_cooldowns =
@@ -654,7 +681,7 @@ function renderAccounts(list) {
     // 参考面板「用量」是累计口径（台账全历史），不是某个时间窗。
     const usageTitle = '累计：' + req + ' 次 / ' + fmtTok(tu.total_tokens) + ' tok / 均延迟 ' + latency +
       (rate === '—' ? '' : ' / ' + rate);
-    const days = (s.session_days_left == null) ? '—' : s.session_days_left.toFixed(1) + 'd';
+    const age = ageCell(s);
     // 每日赠送积分的到期信息（原独立「积分到期提醒」表并入此列）
     const due = accDue(s);
     let dueCell = '<span class="muted">—</span>';
@@ -672,7 +699,7 @@ function renderAccounts(list) {
       '<td class="mark" aria-hidden="true"><i></i></td>' +
       '<td class="who"><div class="nm">' + remarkName(s.name, esc(s.name || '未命名')) + '</div>' +
       '<div class="id">' + esc(s.loginid || (s.userid ? 'uid ' + s.userid : '—')) +
-      (s.session_days_left == null ? '' : ' · 登录态 ' + days) + '</div></td>' +
+      age + '</div></td>' +
       '<td>' + st.tag + err + locks + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + fmtPoints(avail) +
       (s.permanent != null && s.daily_balance != null
@@ -1347,6 +1374,7 @@ const CFG_MAP = {
   sessions_from_client: 'sessions_from_client', identity_mode: 'identity_mode',
   quota_refresh_minutes: 'quota_refresh_minutes',
   session_renew_before_days: 'session_renew_before_days',
+  session_probe_seconds: 'session_probe_seconds', session_drop_hits: 'session_drop_hits',
   keepalive_min_tokens: 'keepalive_min_tokens',
   soft_rate_base_seconds: 'soft_rate_base_seconds', soft_rate_max_seconds: 'soft_rate_max_seconds',
   cooldown_seconds: 'cooldown_seconds', not_found_cooldown_seconds: 'not_found_cooldown_seconds',
@@ -1363,7 +1391,8 @@ const CFG_MAP = {
   log_requests: 'log_requests', log_client_info: 'log_client_info',
 };
 const NUM_FIELDS = ['pick_top_n', 'max_inflight_per_account', 'balance_floor', 'sticky_ttl_seconds',
-  'sticky_max_entries', 'quota_refresh_minutes', 'session_renew_before_days', 'keepalive_min_tokens',
+  'sticky_max_entries', 'quota_refresh_minutes', 'session_renew_before_days',
+  'session_probe_seconds', 'session_drop_hits', 'keepalive_min_tokens',
   'soft_rate_base_seconds', 'soft_rate_max_seconds', 'cooldown_seconds', 'not_found_cooldown_seconds',
   'breaker_threshold', 'breaker_cooldown_seconds', 'breaker_cooldown_max_seconds',
   'timeout_seconds', 'max_retries', 'usage_max_entries'];

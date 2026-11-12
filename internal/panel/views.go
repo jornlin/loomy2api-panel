@@ -136,7 +136,7 @@ func (p *Panel) packagesHandler(w http.ResponseWriter, r *http.Request) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			row := acctRow{UID: a.Name, Nickname: a.Name, Packages: []map[string]any{}}
-			if !a.SessionValid() {
+			if !a.HasSession() {
 				row.Error = "登录态已失效，需重新登录"
 				out[i] = row
 				return
@@ -182,7 +182,7 @@ func (p *Panel) packagesHandler(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 	// 凭证落盘移出并发段：它只是持久化刚刷新到的额度快照，不该占用并发额度。
 	for _, a := range accounts {
-		if a.SessionValid() {
+		if a.HasSession() {
 			p.persist(a)
 		}
 	}
@@ -284,7 +284,7 @@ func (p *Panel) fetchCreditEntries(ctx context.Context, uid string) []creditEntr
 		if uid != "" && a.Name != uid {
 			continue
 		}
-		if !a.Enabled || a.Paused || !a.SessionValid() {
+		if !a.Enabled || a.Paused || !a.HasSession() {
 			continue
 		}
 		wg.Add(1)
