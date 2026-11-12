@@ -193,6 +193,30 @@ func TestInviteBindDryRunAndGuard(t *testing.T) {
 	}
 }
 
+// TestInviteListsNeverNull 单号模式下 skipped / 结果列表也必须序列化成 []，
+// 不能是 null：调用方（脚本、前端）按数组处理，null 会当场炸掉。
+func TestInviteListsNeverNull(t *testing.T) {
+	var binds int32
+	var bound []string
+	srv := inviteUpstream(t, map[string]bool{}, &binds, &bound)
+	defer srv.Close()
+	pl, _ := invitePanel(t, srv.URL)
+
+	req := httptest.NewRequest(http.MethodPost, "/panel/api/invites/bind",
+		strings.NewReader(`{"code":"NEWCD9","account":"acc-old"}`)) // 已激活 → 无可绑对象
+	w := httptest.NewRecorder()
+	pl.ServeHTTP(w, req)
+	body := w.Body.String()
+	for _, key := range []string{`"will_bind":[]`, `"skipped":[`} {
+		if !strings.Contains(body, key) {
+			t.Errorf("响应应含 %s（不能是 null）：%s", key, body)
+		}
+	}
+	if strings.Contains(body, `"skipped":null`) || strings.Contains(body, `"will_bind":null`) {
+		t.Errorf("列表字段不能是 null: %s", body)
+	}
+}
+
 // TestInviteBindWrites 真绑：带该号自己的设备号，成功后把状态写成已激活（避免下次重复绑）。
 func TestInviteBindWrites(t *testing.T) {
 	var binds int32

@@ -164,8 +164,10 @@ func (p *Panel) inviteBind(w http.ResponseWriter, r *http.Request) {
 		acc    *pool.Account
 		reason string
 	}
-	var ready []*pool.Account
-	var skipped []map[string]any
+	// 三个都初始化为空切片而不是 nil：JSON 里 null 与 [] 对调用方差别很大
+	// （单号模式下 skipped 本来是 nil，前端与脚本都要额外判空）。
+	ready := []*pool.Account{}
+	skipped := []map[string]any{}
 	all := p.pool.All()
 	if body.Account != "" {
 		a := p.pool.Get(strings.TrimSpace(body.Account))
