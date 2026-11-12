@@ -61,7 +61,8 @@ func main() {
 	// 判死（清空登录态）必须立刻落盘：否则重启后会把一份已死的凭证又读回来，
 	// 再去上游撞一次 401。池只认凭证内容，不知道目录在哪，所以由这里注入。
 	p.SetAccountSaver(func(a *pool.Account) error { return pool.SaveAccount(authDir, a) })
-	if accounts, lerr := pool.LoadAccounts(authDir); lerr == nil && len(accounts) > 0 {		p.SyncToDir(accounts)
+	if accounts, lerr := pool.LoadAccounts(authDir); lerr == nil && len(accounts) > 0 {
+		p.SyncToDir(accounts)
 		p.ApplyState()
 		log.Printf("从 %s 加载 %d 个账号", authDir, len(accounts))
 	} else if lerr != nil {

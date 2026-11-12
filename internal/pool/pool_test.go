@@ -228,7 +228,7 @@ func TestLocalExpiryDoesNotBlockRotation(t *testing.T) {
 	p := New("")
 	p.SetOptions(Options{Strategy: "round_robin", StickyTTL: 1800})
 	a := newTestAccount("aged", 500, true)
-	a.ExpireAt = time.Now().Add(-6 * time.Hour).Unix()  // 本地「已过期」
+	a.ExpireAt = time.Now().Add(-6 * time.Hour).Unix()         // 本地「已过期」
 	a.ObtainedAt = time.Now().Add(-15 * 24 * time.Hour).Unix() // 已服役 15 天
 	p.Add(a)
 
@@ -330,9 +330,15 @@ func TestSuspectClearedBySuccess(t *testing.T) {
 	p.Add(a)
 
 	p.ReportFailure(a, 401, "unauthorized", "", "m")
+	if a.LastError() == "" {
+		t.Fatal("存疑时应给出描述")
+	}
 	a.ClearSessionSuspect() // 复核通过（server 侧调用）
 	if !a.Healthy() {
 		t.Error("撤销存疑后应回到轮换")
+	}
+	if a.LastError() != "" {
+		t.Errorf("复核通过后不该还挂着「复核中」的描述，实际 %q", a.LastError())
 	}
 	p.ReportSuccess(a, "", "m", 0)
 	if a.SessionSuspectHits() != 0 {

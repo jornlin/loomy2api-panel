@@ -33,6 +33,13 @@ const (
 	CoolHard = "hard" // 额度耗尽，等到恢复墙钟
 )
 
+// suspectErrPrefix 「登录态存疑」错误描述的固定前缀：复核通过时据此判断
+// 该不该把这条描述清掉（不清别的错误）。
+const suspectErrPrefix = "登录态存疑"
+
+// SuspectReason 上游 401 后写入的存疑描述（面板「状态」列下面那行灰字）。
+const SuspectReason = suspectErrPrefix + "（上游 401，复核中）"
+
 // Account 一个 Loomy 账号及其运行态。
 type Account struct {
 	Name    string `json:"name"`
@@ -215,10 +222,16 @@ func (a *Account) MarkSessionSuspect(window float64, reason string) int {
 }
 
 // ClearSessionSuspect 复核通过：撤销存疑，回到轮换。
+//
+// 连带清掉「登录态存疑（复核中）」那条描述 —— 它描述的是复核中的状态，复核既然
+// 通过就不再成立（与 lastError 一律表示当前状态的约定一致）。
 func (a *Account) ClearSessionSuspect() {
 	a.rt.mu.Lock()
 	defer a.rt.mu.Unlock()
 	a.rt.suspectUntil = 0
+	if strings.HasPrefix(a.rt.lastError, suspectErrPrefix) {
+		a.rt.lastError = ""
+	}
 }
 
 // InSessionSuspect 是否处于登录态存疑期。

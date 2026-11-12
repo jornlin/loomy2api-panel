@@ -489,7 +489,7 @@ func (p *Pool) ReportFailure(a *Account, status int, body, sessionKey, model str
 		//   - 复核通过 → 回池，当作一次抖动。
 		// 复核窗口到期也会自动回池，所以复核机制本身挂掉不会把号永久关在外面；
 		// 而连续 401 达 SessionDropHits 次时直接判死，作为兜底。
-		hits := a.MarkSessionSuspect(opts.SessionProbeSeconds, "登录态存疑（上游 401，复核中）")
+		hits := a.MarkSessionSuspect(opts.SessionProbeSeconds, SuspectReason)
 		if opts.SessionDropHits > 0 && hits >= opts.SessionDropHits {
 			p.DropSession(a, fmt.Sprintf("登录态失效（连续 %d 次被上游拒绝，需重新登录）", hits))
 		}
