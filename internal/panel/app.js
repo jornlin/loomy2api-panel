@@ -678,6 +678,12 @@ function renderAccounts(list) {
   tb.innerHTML = pageRows.map(s => {
     const st = accountStatus(s, now);
     const err = s.last_error ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.last_error) + '</div>' : '';
+    // 上次测活摘要（内存态）：挂在状态列下面，点「测活」可重跑并看完整响应。
+    const lp = s.last_probe;
+    const lpTip = lp ? '上次测活：' + probeVerdictText(lp.verdict) + '\n模型：' + (lp.model || '—') +
+      '\n结果：' + (lp.summary || '—') + '\n耗时：' + fmtMs(lp.latency_ms) + ' · 消耗 ' + fmtPoints(lp.points) + ' 分' : '';
+    const lpLine = lp ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px" title="' + esc(lpTip) + '">测活 ' +
+      esc(probeVerdictText(lp.verdict)) + ' · ' + ago(new Date(lp.at * 1000).toISOString()) + '</div>' : '';
     const locks = modelLocksHtml(s.model_cooldowns, now);
     const avail = Number(s.available || 0);
     const pct = Math.min(100, Math.round(avail / maxCred * 100));
@@ -714,7 +720,7 @@ function renderAccounts(list) {
       '<td class="who"><div class="nm">' + remarkName(s.name, esc(s.name || '未命名')) + '</div>' +
       '<div class="id">' + esc(s.loginid || (s.userid ? 'uid ' + s.userid : '—')) +
       age + '</div></td>' +
-      '<td>' + st.tag + err + locks + '</td>' +
+      '<td>' + st.tag + err + lpLine + locks + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + fmtPoints(avail) +
       (s.permanent != null && s.daily_balance != null
         ? '<div class="id" style="font-size:11px">长期 ' + fmtPoints(s.permanent) + ' · 每日 ' + fmtPoints(s.daily_balance) + '</div>' : '') +
@@ -732,6 +738,7 @@ function renderAccounts(list) {
       '<td class="acts">' +
         '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.name) + '"' + (s.checkin_done ? ' title="今日已签到；点击可重新签到并刷新余额"' : '') + '>' + (s.checkin_done ? '已签' : '签到') + '</button>' +
         '<button class="xs ghost" data-a="balance" data-u="' + esc(s.name) + '">余额</button>' +
+        '<button class="xs ghost" data-a="probe" data-u="' + esc(s.name) + '" title="用该账号自己的 session 发一次真实请求，验证模型是否可用（会扣积分）">测活</button>' +
         (s.has_password ? '<button class="xs ghost" data-a="login" data-u="' + esc(s.name) + '">登录</button>' : '') +
         (s.disabled || s.in_cooldown || s.in_breaker
           ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.name) + '">解冻</button>'
@@ -874,6 +881,8 @@ $('accBody').addEventListener('click', async ev => {
   const b = ev.target.closest('button[data-a]');
   if (!b) return;
   const u = b.dataset.u, a = b.dataset.a;
+  // 测活走弹窗：不在这里禁用按钮 / 刷新概览，避免把长请求挂在行内。
+  if (a === 'probe') { openProbe(u); return; }
   if (a === 'remove' && !confirm('移除账号将删除池状态与 auths/ 下的凭证文件，且不可恢复。确认移除？')) return;
   if (a === 'disable' && !confirm('禁用后该账号不再参与选号，也停止签到/刷额度（需手动启用）。若只是想临时让位、仍要保号，请改用「暂停选号」。确认禁用？')) return;
   b.disabled = true;
@@ -914,6 +923,187 @@ $('accBody').addEventListener('click', async ev => {
     loadOverview(true);
   }
 });
+
+/* ── 测活：单账号 × 指定模型 ─────────────────────────────────────────
+   后端用被点账号自己的 session 直连上游（不经过选号器），所以结果回答的是
+   「这个模型在这个号下可用吗」，而不是「池里有没有号能用」。
+   判定与响应展示都在弹窗里：正文 / 思考 / 视觉图 / usage / 原始响应。 */
+let probeAcc = '', probeModels = null, probeSeq = 0;
+
+const PROBE_LEVEL = { ok: ['ok', '通过'], warn: ['warn', '告警'], fail: ['bad', '失败'] };
+const PROBE_VERDICT = { ok: ['ok', '可用'], warn: ['warn', '部分可用'], fail: ['bad', '不可用'] };
+
+function probeVerdictText(v) {
+  return ({ ok: '可用', warn: '有告警', fail: '不可用' })[v] || '未判定';
+}
+
+function probeModelLabel(m) {
+  const caps = (m.capabilities || []).filter(c => c === 'vision' || c === 'reasoning');
+  const bits = [m.name || m.id];
+  if (caps.length) bits.push('[' + caps.join('/') + ']');
+  if (m.multiplier != null) bits.push('x' + m.multiplier);
+  return bits.join(' ');
+}
+
+function probeModelInfo(id) {
+  const key = String(id || '').toLowerCase();
+  return (probeModels || []).find(m => String(m.id).toLowerCase() === key) || null;
+}
+
+async function loadProbeModels() {
+  if (probeModels) return probeModels;
+  const d = await api('models');
+  // 图像生成模型不能走 /chat/completions，不进测活候选；用户仍可手填目录外模型。
+  probeModels = (d.models || []).filter(m => (m.type || 'chat') !== 'image');
+  $('probeModelList').innerHTML = probeModels.map(m =>
+    '<option value="' + esc(m.id) + '" label="' + esc(probeModelLabel(m)) + '"></option>').join('');
+  return probeModels;
+}
+
+function probeDefaultModel() {
+  const saved = localStorage.getItem('loomy2api.probeModel');
+  if (saved) return saved;
+  const def = ((overviewData && overviewData.default_model) || '').replace(/^imodel\//, '');
+  const hit = probeModels.find(m => String(m.id).toLowerCase() === def.toLowerCase());
+  return hit ? hit.id : (probeModels.length ? probeModels[0].id : '');
+}
+
+function refreshProbeHint() {
+  const model = $('probeModel').value.trim();
+  const mode = $('probeMode').value;
+  const m = probeModelInfo(model);
+  const bits = [];
+  if (!m) {
+    bits.push('模型不在当前上游目录中：仍可测，但 strict 校验开启时上游可能直接 404');
+  } else {
+    const caps = m.capabilities || [];
+    bits.push('能力：' + (caps.length ? caps.join(' / ') : '未标注') +
+      (m.multiplier != null ? ' · 倍率 x' + m.multiplier : ''));
+    if ((mode === 'vision' || mode === 'both') && caps.indexOf('vision') < 0) {
+      bits.push('该模型目录未标注 vision，视觉测活可能失败（这本身也是有价值的结论）');
+    }
+  }
+  if ($('probeNoThink').checked) {
+    const tiers = (m && m.reasoning_efforts) || [];
+    bits.push(tiers.indexOf('none') >= 0 ? '已选择关闭思考（reasoning_effort=none）'
+      : '该模型目录未提供 none 档位，将走上游默认思考');
+  }
+  bits.push(mode === 'both' ? '将发 2 次真实请求，消耗两次积分' : '将发 1 次真实请求，消耗积分');
+  $('probeHint').textContent = bits.join('；');
+}
+
+function openProbe(name) {
+  probeAcc = name;
+  probeSeq++; // 作废上一个账号尚未返回的结果，避免写进新弹窗
+  $('btnProbeRun').disabled = false; // 上一个在途请求的 finally 不再负责这个按钮
+  $('probeAcc').textContent = name;
+  $('probeResult').innerHTML = '';
+  $('probePrompt').value = '';
+  $('probeImageUrl').value = '';
+  $('probeNoThink').checked = true;
+  $('probeVeil').classList.add('on');
+  loadProbeModels().then(() => {
+    if (!$('probeModel').value.trim()) $('probeModel').value = probeDefaultModel();
+    refreshProbeHint();
+  }).catch(e => {
+    $('probeHint').textContent = '模型目录读取失败：' + e.message + '（仍可手填模型 ID）';
+  });
+}
+
+function renderProbeResult(r) {
+  const vb = PROBE_VERDICT[r.verdict] || PROBE_VERDICT.fail;
+  const checks = r.checks || [];
+  let h = '<div class="probe-sum"><span class="tag ' + vb[0] + '">' + vb[1] + '</span>' +
+    '<b>' + esc(r.summary || '') + '</b>' +
+    '<span class="note">' + checks.length + ' 项 · 总耗时 ' + fmtMs(r.latency_ms) +
+    (r.reasoning_effort ? ' · 思考档位 ' + esc(r.reasoning_effort) : '') +
+    ' · 消耗 ' + fmtPoints(r.points) + ' 分</span></div>';
+  if (r.image) {
+    const isData = String(r.image).startsWith('data:');
+    h += '<div class="probe-img">' +
+      (isData
+        ? '<img alt="视觉测活图" src="' + esc(r.image) + '">'
+        : '<a href="' + esc(r.image) + '" target="_blank" rel="noopener noreferrer">打开测活图片</a>') +
+      '<span>' + (isData
+        ? '视觉测活用的内置图（从左到右：橙三角 / 紫圆 / 棕方块）。'
+        : '本次使用自定义图片 URL。') +
+      '<br>下方「实际」即模型对这张图的回答。</span></div>';
+  }
+  for (const c of checks) {
+    const lv = PROBE_LEVEL[c.level] || PROBE_LEVEL.fail;
+    const usage = c.usage || {};
+    const tok = [];
+    if (usage.prompt_tokens != null) tok.push('prompt ' + usage.prompt_tokens);
+    if (usage.completion_tokens != null) tok.push('completion ' + usage.completion_tokens);
+    const rd = (usage.completion_tokens_details || {}).reasoning_tokens;
+    if (rd != null) tok.push('thinking ' + rd);
+    h += '<div class="probe-check">' +
+      '<h4><span class="tag ' + lv[0] + '">' + lv[1] + '</span>' +
+      (c.kind === 'vision' ? '视觉测活' : '文本测活') +
+      '<span class="note">HTTP ' + (c.http_status || '—') + ' · ' + fmtMs(c.latency_ms) +
+      ' · ' + fmtPoints(c.points) + ' 分</span></h4>' +
+      '<div class="probe-kv">' +
+        '<span class="k">结论</span><span class="v">' + esc(c.summary || '') + '</span>' +
+        (c.expected ? '<span class="k">期望</span><span class="v">' + esc(c.expected) + '</span>' : '') +
+        (c.observed ? '<span class="k">实际</span><span class="v">' + esc(c.observed) + '</span>' : '') +
+        (c.upstream_model ? '<span class="k">执行模型</span><span class="v">' + esc(c.upstream_model) + '</span>' : '') +
+        (c.finish_reason ? '<span class="k">finish</span><span class="v">' + esc(c.finish_reason) + '</span>' : '') +
+        (tok.length ? '<span class="k">usage</span><span class="v">' + esc(tok.join(' · ')) + '</span>' : '') +
+        (c.request_id ? '<span class="k">请求 ID</span><span class="v">' + esc(c.request_id) + '</span>' : '') +
+      '</div>' +
+      ((c.notes && c.notes.length) ? '<div class="probe-notes">' + c.notes.map(n => esc(n)).join('<br>') + '</div>' : '') +
+      (c.content ? '<div class="probe-pre">' + esc(c.content) + '</div>' : '') +
+      (c.reasoning ? '<details><summary>思考过程（' + c.reasoning.length + ' 字）</summary><div class="probe-pre">' +
+        esc(c.reasoning) + '</div></details>' : '') +
+      (c.error ? '<details><summary>错误详情</summary><div class="probe-pre">' + esc(c.error) + '</div></details>' : '') +
+      (c.raw ? '<details><summary>原始响应</summary><div class="probe-pre">' + esc(c.raw) + '</div></details>' : '') +
+      '</div>';
+  }
+  $('probeResult').innerHTML = h;
+}
+
+async function runProbe() {
+  const model = $('probeModel').value.trim();
+  if (!model) { toast('请填写模型 ID', 'err'); return; }
+  const seq = ++probeSeq;
+  const acc = probeAcc;
+  const mode = $('probeMode').value;
+  const body = { model, mode };
+  const custom = $('probePrompt').value.trim();
+  if (custom && mode !== 'vision') body.prompt = custom;
+  const imageUrl = $('probeImageUrl').value.trim();
+  if (imageUrl && (mode === 'vision' || mode === 'both')) body.image_url = imageUrl;
+  // 只有目录明确声明支持 none 时才发，避免把「关思考」变成一个 400。
+  const m = probeModelInfo(model);
+  if ($('probeNoThink').checked && m && (m.reasoning_efforts || []).indexOf('none') >= 0) {
+    body.reasoning_effort = 'none';
+  }
+
+  const btn = $('btnProbeRun');
+  btn.disabled = true;
+  $('probeResult').innerHTML = '<div class="probe-run"><span class="dots"></span>正在请求上游（推理模型可能要几十秒）…</div>';
+  try {
+    localStorage.setItem('loomy2api.probeModel', model);
+    const r = await api('accounts/' + encodeURIComponent(acc) + '/probe', {
+      method: 'POST', body: JSON.stringify(body),
+    });
+    if (seq !== probeSeq) return; // 弹窗已切到别的账号
+    renderProbeResult(r);
+    // 测活会写台账（kind=probe）并可能改变账号冷却状态，顺手刷新账号池。
+    loadOverview(true);
+  } catch (e) {
+    if (seq !== probeSeq) return;
+    $('probeResult').innerHTML = '<div class="state err">测活失败：' + esc(e.message || '未知错误') + '</div>';
+  } finally {
+    if (seq === probeSeq) btn.disabled = false;
+  }
+}
+
+$('probeModel').addEventListener('input', refreshProbeHint);
+$('probeMode').addEventListener('change', refreshProbeHint);
+$('probeNoThink').addEventListener('change', refreshProbeHint);
+$('btnProbeClose').onclick = () => $('probeVeil').classList.remove('on');
+$('btnProbeRun').onclick = runProbe;
 
 $('btnCheckinAll').onclick = async () => {
   const btn = $('btnCheckinAll');

@@ -1307,6 +1307,10 @@ func newSSEStream(body io.Reader) *SSEStream {
 	return &SSEStream{body: body, buf: make([]byte, 0, 16<<10)}
 }
 
+// NewSSEStream 导出给面板测活复用同一套 SSE 解析（上游对久无响应的非流式请求
+// 约 60s 就回 504，测活也必须走流式取数再聚合）。
+func NewSSEStream(body io.Reader) *SSEStream { return newSSEStream(body) }
+
 // Next 读下一个 data 帧；ok=false 表示流结束。
 func (s *SSEStream) Next() (map[string]any, bool, error) {
 	tmp := make([]byte, 8<<10)
@@ -1428,6 +1432,9 @@ type toolBuf struct {
 func newAggregator() *Aggregator {
 	return &Aggregator{tools: map[int]*toolBuf{}, usage: map[string]any{}}
 }
+
+// NewAggregator 导出给面板测活复用（把流式增量聚合成一条非流式响应）。
+func NewAggregator() *Aggregator { return newAggregator() }
 
 // Feed 吃一个增量。
 func (a *Aggregator) Feed(obj map[string]any) {

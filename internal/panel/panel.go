@@ -59,6 +59,11 @@ type Panel struct {
 	pkMu    sync.Mutex
 	pkAt    time.Time
 	pkCache map[string]any
+
+	// 账号级测活的上次结果（内存态，重启即忘）：账号行上显示「上次测活」摘要，
+	// 完整响应在弹窗里。测活本身会写台账，不需要再落一份盘。
+	probeMu sync.Mutex
+	probes  map[string]probeMemo
 }
 
 // New 构造面板。
@@ -70,6 +75,7 @@ func New(cfg *config.Config, p *pool.Pool, acc *account.Client, up *upstream.Cli
 		mux:     http.NewServeMux(),
 		ring:    NewRing(500),
 		locks:   map[string]*sync.Mutex{},
+		probes:  map[string]probeMemo{},
 		started: time.Now(),
 	}
 	pl.routes()
@@ -95,6 +101,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/accounts", p.withAuth(p.addAccount))
 	p.mux.HandleFunc("POST /panel/api/accounts/{name}/login", p.withAuth(p.loginAccount))
 	p.mux.HandleFunc("POST /panel/api/accounts/{name}/checkin", p.withAuth(p.checkinAccount))
+	// 单账号模型测活：用该号自己的 session 直连上游，不经过选号器。
+	p.mux.HandleFunc("POST /panel/api/accounts/{name}/probe", p.withAuth(p.probeAccount))
 	p.mux.HandleFunc("POST /panel/api/accounts/{name}/balance", p.withAuth(p.refreshAccount))
 	p.mux.HandleFunc("POST /panel/api/accounts/{name}/refresh", p.withAuth(p.refreshAccount))
 	p.mux.HandleFunc("POST /panel/api/accounts/{name}/pause", p.withAuth(p.pauseAccount))
@@ -178,6 +186,9 @@ func (p *Panel) accountRows() []map[string]any {
 	rows := make([]map[string]any, 0, p.pool.Count())
 	for _, a := range p.pool.All() {
 		pub := a.Public()
+		if memo, ok := p.lastProbe(a.Name); ok {
+			pub["last_probe"] = memo
+		}
 		if b := all.ByAccount[a.Name]; b != nil {
 			tokens := b.Prompt + b.Completion
 			tps := float64(0)

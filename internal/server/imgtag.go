@@ -40,6 +40,12 @@ func prefersImageTag(model string, allow []string) bool {
 	return false
 }
 
+// RewriteImageTags 是 rewriteImageTags 的导出包装：面板测活需要与对话热路径
+// 使用同一套按模型分派的图片形态，避免「网关能看图、面板测活说看不到图」。
+func RewriteImageTags(body map[string]any, model string, allow []string) int {
+	return rewriteImageTags(body, model, allow)
+}
+
 // rewriteImageTags 就地改写 messages 里的 data URI 图片块为 <image_base64> 标记，
 // 返回转换的图片数。allow 为空或模型不在名单里时是零成本的空转。
 //

@@ -21,7 +21,7 @@ type Record struct {
 	Time       int64  `json:"t"`
 	Account    string `json:"account,omitempty"`
 	Model      string `json:"model,omitempty"`
-	Kind       string `json:"kind,omitempty"` // chat | messages | responses | image | embed | search
+	Kind       string `json:"kind,omitempty"` // chat | messages | responses | image | embed | search | probe
 	Stream     bool   `json:"stream,omitempty"`
 	Status     int    `json:"status"`
 	Prompt     int64  `json:"prompt"`

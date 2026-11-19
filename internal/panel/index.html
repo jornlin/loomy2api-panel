@@ -370,6 +370,27 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 .vc.expired { border-style: dashed; }
 .vc.expired .hd, .vc.expired .meta { opacity: .55; }
 
+/* ── 测活（单账号 × 指定模型的可用性检查）────────────────────────── */
+.probe-sum { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); margin-bottom: 12px; }
+.probe-sum b { font-weight: 600; font-size: 13px; }
+.probe-sum .note { margin-left: auto; color: var(--ink-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.probe-img { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; color: var(--ink-3); font-size: 12px; }
+.probe-img img { width: 240px; max-width: 100%; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.probe-check { border: 1px solid var(--line-soft); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; }
+.probe-check h4 { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 620; margin-bottom: 8px; }
+.probe-check h4 .note { margin-left: auto; color: var(--ink-3); font-size: 11.5px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.probe-kv { display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 3px 10px; font-size: 12.5px; margin-bottom: 8px; }
+.probe-kv .k { color: var(--ink-3); }
+.probe-kv .v { color: var(--ink-2); word-break: break-word; }
+.probe-pre { white-space: pre-wrap; word-break: break-word; background: var(--surface-2); border: 1px solid var(--line-soft);
+  border-radius: 8px; padding: 9px 11px; font: 12px/1.6 var(--mono); color: var(--ink-2);
+  max-height: 220px; overflow: auto; margin-top: 7px; }
+.probe-check details { margin-top: 7px; }
+.probe-check summary { cursor: pointer; color: var(--ink-3); font-size: 12px; }
+.probe-notes { margin-top: 6px; font-size: 12px; color: var(--warn); }
+.probe-run { display: flex; align-items: center; gap: 8px; color: var(--ink-3); font-size: 13px; padding: 18px 4px; }
+
 /* ── Toast ───────────────────────────────────────────────────────── */
 #toasts { position: fixed; right: 20px; bottom: 20px; z-index: 90; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
 .tst {
@@ -1382,6 +1403,46 @@ th.sorted[data-dir="desc"]::after { content: " ▼"; font-size: 10px; }
 </div>
 
 <div id="toasts"></div>
+
+<!-- 测活：对单个账号 × 指定模型发一次真实对话，观察正文 / 思考 / 视觉 / 用量。
+     用该号自己的 session 直连上游，不经过选号器；每次都会扣积分。 -->
+<div class="veil" id="probeVeil">
+  <div class="dlg" style="width:780px">
+    <header>
+      <h3>测活 · <span id="probeAcc">—</span></h3>
+      <div class="hint">用该账号自己的 session 直连上游，不经过选号器。每次测活都是真实请求，会扣积分；「全部」会发两次（文本 + 视觉）。</div>
+    </header>
+    <div class="body">
+      <div class="grid2">
+        <label class="fld"><span class="lb">模型</span>
+          <input id="probeModel" list="probeModelList" placeholder="模型 ID（也可手填目录外的名字）" autocomplete="off">
+          <datalist id="probeModelList"></datalist>
+        </label>
+        <label class="fld"><span class="lb">测试内容</span>
+          <select id="probeMode">
+            <option value="text" selected>文本（2+2，验生成）</option>
+            <option value="vision">视觉（三色图形，验读图）</option>
+            <option value="both">全部（两次请求）</option>
+          </select>
+        </label>
+      </div>
+      <label class="fld"><span class="lb">自定义提问（可选，仅文本测活用）</span>
+        <input id="probePrompt" placeholder="留空 = 标准 2+2 并校验答案；填写后只判断是否有正文" autocomplete="off">
+      </label>
+      <label class="fld"><span class="lb">视觉图片 URL（可选）</span>
+        <input id="probeImageUrl" placeholder="公网可访问的图片地址；留空 = 内置三色图（data URI）。上游不接受 data URI 时填这里" autocomplete="off">
+      </label>
+      <div class="switch"><span class="lb">关闭思考（更快更省；模型目录支持 none 时生效，否则走上游默认）</span><input type="checkbox" id="probeNoThink" checked></div>
+      <div class="hint" id="probeHint">—</div>
+      <div id="probeResult"></div>
+    </div>
+    <footer>
+      <span class="grow"></span>
+      <button id="btnProbeClose">关闭</button>
+      <button class="primary" id="btnProbeRun">开始测活</button>
+    </footer>
+  </div>
+</div>
 
 <!-- 账号备注：落盘到 auths/<账号>.json（remark 键）；账号池与用量两个视图同步显示 -->
 <div class="veil" id="remarkVeil">
